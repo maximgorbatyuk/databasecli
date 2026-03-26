@@ -1,207 +1,278 @@
-# Design: MCP Server for AI Agent Integration
+# databasecli MCP Server
 
-## 1. Overview
+A read-only MCP (Model Context Protocol) server that gives AI agents secure access to PostgreSQL databases. The server communicates over stdio and exposes 14 tools for database discovery, querying, schema inspection, and analysis.
 
-databasecli becomes an MCP (Model Context Protocol) server, allowing AI agents (Claude, etc.) to interact with PostgreSQL databases through a secure, read-only gateway. The server communicates via stdio JSON-RPC and exposes databasecli's existing commands as MCP tools.
+## Security Model
 
-**Key properties:**
-- **Read-only**: All connections use `SET default_transaction_read_only = on` + client-side SQL validation
-- **Stateful sessions**: Agent connects to databases, connections persist across tool calls
-- **Passwords hidden**: Agent references databases by name, never sees credentials
-- **Analyze-only DDL**: Agent can inspect schema and suggest migrations, never execute DDL
+All database connections enforce read-only access at two layers:
 
-## 2. Architecture
+1. **Server-side**: `SET default_transaction_read_only = on` on every connection. PostgreSQL itself rejects INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE.
+2. **Client-side**: SQL validation rejects anything that isn't SELECT, WITH, EXPLAIN, SHOW, or TABLE. Multi-statement queries (containing `;`) are also rejected.
 
-New crate `databasecli-mcp` — separate binary, shares `databasecli-core`.
+Additionally:
+- Statement timeout of 30 seconds prevents runaway queries.
+- Database passwords are never exposed to the agent. Databases are referenced by name only.
+- The `suggest_migration` tool analyzes schema and returns context, but **never executes DDL**.
 
-```
-crates/databasecli-mcp/
-  Cargo.toml
-  src/
-    main.rs           — clap args, tokio runtime, .serve(stdio()).await
-    state.rs          — McpSessionState: configs + Arc<Mutex<ConnectionManager>>
-    server.rs         — DatabaseCliServer with #[tool_router] and #[tool_handler]
-    tools/
-      mod.rs
-      connection.rs   — list_configured, connect, disconnect, list_connected
-      query.rs        — query, compare
-      schema.rs       — schema, erd, sample
-      analysis.rs     — analyze, summary, trend, health
-      migration.rs    — suggest_migration (analyze-only)
-    json_convert.rs   — core structs → serde_json::Value
+## Installation
+
+```bash
+# From the project root
+cargo build -p databasecli-mcp --release
+
+# The binary is at target/release/databasecli-mcp
 ```
 
-**Dependencies:**
-```toml
-rmcp = { version = "1.2", features = ["server", "macros", "schemars", "transport-io"] }
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = "1"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-databasecli-core = { path = "../databasecli-core" }
+## Configuration
+
+### Database Config File
+
+The server reads database connections from an INI file at `~/.databasecli/databases.ini` (or `<directory>/.databasecli/databases.ini` when using `-D`):
+
+```ini
+[production]
+host = db.example.com
+port = 5432
+user = readonly_user
+password = secret
+dbname = myapp
+
+[staging]
+host = staging-db.example.com
+port = 5432
+user = readonly_user
+password = secret
+dbname = myapp_staging
 ```
 
-## 3. rmcp API Pattern
+Each section name becomes the database identifier that the agent uses to connect.
 
-```rust
-// Server struct with tool router
-#[derive(Debug, Clone)]
-pub struct DatabaseCliServer {
-    tool_router: ToolRouter<Self>,
-    state: Arc<McpSessionState>,
-}
+### Claude Desktop
 
-// Tool definitions
-#[tool_router]
-impl DatabaseCliServer {
-    pub fn new(state: McpSessionState) -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-            state: Arc::new(state),
-        }
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "databasecli": {
+      "command": "/path/to/databasecli-mcp",
+      "args": ["-D", "/path/to/project"]
     }
-
-    #[tool(description = "List all configured databases...")]
-    async fn list_configured_databases(&self) -> Result<CallToolResult, McpError> {
-        // return JSON
-        Ok(CallToolResult::success(vec![Content::text(json_string)]))
-    }
-
-    #[tool(description = "Execute read-only SQL...")]
-    async fn query(
-        &self,
-        Parameters(params): Parameters<QueryParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let mgr = Arc::clone(&self.state.manager);
-        let result = tokio::task::spawn_blocking(move || {
-            let mut m = mgr.lock().unwrap();
-            execute_query(m.get_mut(&db).unwrap(), &params.sql)
-        }).await.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        // convert result to JSON
-    }
-}
-
-// ServerHandler registration
-#[tool_handler]
-impl ServerHandler for DatabaseCliServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2025_06_18,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("databasecli: read-only PostgreSQL gateway...".into()),
-        }
-    }
-}
-
-// Entrypoint
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
-    let state = McpSessionState::new(directory)?;
-    let service = DatabaseCliServer::new(state).serve(stdio()).await?;
-    service.waiting().await?;
-    Ok(())
+  }
 }
 ```
 
-## 4. MCP Tools (14 total)
+### Claude Code
 
-### Connection Management (no DB connection needed)
+Add to `.mcp.json` in your project root:
 
-**list_configured_databases** — "List all databases from the config file. Returns name, host, port, dbname, user. Passwords are never exposed. Use this first to discover available databases."
-- Input: none
-- Output: `[{"name":"prod","host":"...","port":5432,"dbname":"...","user":"..."}]`
+```json
+{
+  "mcpServers": {
+    "databasecli": {
+      "command": "/path/to/databasecli-mcp",
+      "args": ["-D", "."]
+    }
+  }
+}
+```
 
-**connect_databases** — "Connect to databases by name. Names must match config entries. Connections persist across tool calls. All connections are read-only."
-- Input: `{"names": ["prod", "staging"]}`
-- Output: `{"connected":["prod"],"errors":[{"name":"bad","error":"..."}]}`
+### Other MCP Clients
 
-**disconnect_databases** — "Disconnect databases by name. Empty array disconnects all."
-- Input: `{"names": ["prod"]}`
-- Output: `{"disconnected":["prod"],"still_connected":["staging"]}`
+Any MCP client that supports stdio transport can use the server:
 
-**list_connected_databases** — "Show currently connected databases."
-- Input: none
-- Output: `[{"name":"prod","host":"...","port":5432,"dbname":"...","user":"..."}]`
+```bash
+databasecli-mcp                    # uses ~/.databasecli/databases.ini
+databasecli-mcp -D /project/path   # uses /project/path/.databasecli/databases.ini
+```
 
-### Query & Compare (connection required)
+The server reads JSON-RPC messages from stdin and writes responses to stdout. Logs go to stderr.
 
-**query** — "Execute read-only SQL. Only SELECT/WITH/EXPLAIN/SHOW/TABLE allowed."
-- Input: `{"sql": "SELECT ...", "database": "prod"}`
-- Output: `{"database":"prod","columns":[...],"rows":[...],"row_count":N,"execution_time_ms":N}`
+## Tools Reference
 
-**compare** — "Same query across ALL connected databases. Requires 2+ connections."
-- Input: `{"sql": "SELECT count(*) FROM users"}`
-- Output: `{"query":"...","results":[{per db}],"errors":[{name,error}]}`
+### Connection Management
 
-### Schema & Structure
+#### list_configured_databases
 
-**schema** — "Full schema: tables, columns, types, PKs, row counts, sizes."
-- Input: `{"schema_name": "public", "database": "prod"}`
-- Output: nested JSON with tables, columns, primary_key_columns
+Discover what databases are available in the config file. Call this first.
 
-**sample** — "Preview rows from a table."
-- Input: `{"table":"users","database":"prod","limit":20,"order_by":"created_at"}`
-- Output: `{"columns":[...],"rows":[...],"total_rows_in_table":N}`
+- **Parameters**: none
+- **Returns**: JSON array of `{name, host, port, dbname, user}` (passwords excluded)
 
-**erd** — "Entity-relationship diagram. Returns Mermaid syntax + structured data."
-- Input: `{"database":"prod","schema_name":"public"}`
-- Output: `{"mermaid":"erDiagram...","tables":[...],"foreign_keys":[...]}`
+#### connect_databases
+
+Establish persistent read-only connections to one or more databases.
+
+- **Parameters**: `{"names": ["production", "staging"]}`
+- **Returns**: `{"connected": ["production"], "errors": [{"name": "bad", "error": "..."}]}`
+
+Connections persist for the lifetime of the MCP session. All subsequent tools operate on connected databases.
+
+#### disconnect_databases
+
+Drop connections. Pass empty array to disconnect all.
+
+- **Parameters**: `{"names": ["production"]}` or `{"names": []}`
+- **Returns**: `{"disconnected": [...], "still_connected": [...]}`
+
+#### list_connected_databases
+
+Show currently active connections.
+
+- **Parameters**: none
+- **Returns**: JSON array of `{name, host, port, dbname, user}`
+
+### Querying
+
+#### query
+
+Execute a read-only SQL query on a connected database.
+
+- **Parameters**: `{"sql": "SELECT * FROM users LIMIT 10", "database": "production"}`
+  - `database` is optional; omit to use the first connected database
+- **Returns**: `{"database": "production", "columns": [...], "rows": [[...]], "row_count": 10, "execution_time_ms": 42}`
+- **Allowed statements**: SELECT, WITH, EXPLAIN, SHOW, TABLE
+- **Blocked**: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, multi-statement (`;`)
+
+#### compare
+
+Run the same query across ALL connected databases. Useful for comparing production vs staging.
+
+- **Parameters**: `{"sql": "SELECT count(*) FROM users"}`
+- **Returns**: `{"query": "...", "results": [{per-database result}], "errors": [{per-database errors}]}`
+- **Requires**: 2+ connected databases for meaningful comparison
+
+### Schema Inspection
+
+#### schema
+
+Get full schema: tables, columns, data types, primary keys, row counts, sizes.
+
+- **Parameters**: `{"schema_name": "public", "database": "production"}`
+  - Both optional. Omit `database` to get schema for all connected databases.
+- **Returns**: `{"schemas": [{database, tables: [{name, columns, primary_key_columns, row_count, total_size}]}], "errors": [...]}`
+
+#### sample
+
+Preview rows from a table.
+
+- **Parameters**: `{"table": "users", "database": "production", "limit": 10, "order_by": "created_at"}`
+  - `schema_name` defaults to `"public"`, `limit` defaults to `20`, `order_by` is optional (DESC)
+- **Returns**: `{columns, rows, total_rows_in_table, rows_returned}`
+
+#### erd
+
+Entity-relationship diagram showing tables, columns, PKs, and foreign keys.
+
+- **Parameters**: `{"database": "production", "schema_name": "public"}`
+- **Returns**: `{"mermaid": "erDiagram\n...", "tables": [...], "foreign_keys": [...]}`
+  - `mermaid` field contains renderable Mermaid syntax
+  - `tables` and `foreign_keys` fields contain structured data for programmatic use
 
 ### Analysis
 
-**analyze** — "Profile a table: nulls, cardinality, min/max, top values per column."
-- Input: `{"table":"users","database":"prod"}`
-- Output: column profiles with stats
+#### analyze
 
-**summary** — "Database overview: size, table count, rows, indexes, largest tables."
-- Input: `{"database":"prod"}`
-- Output: `{"database_name":"prod","total_size":"1.2 GB","table_count":42,...}`
+Profile a table: per-column null counts, distinct values, min/max/avg, top 10 most frequent values.
 
-**trend** — "Time-series: counts/averages grouped by day/week/month/year."
-- Input: `{"table":"orders","database":"prod","timestamp_column":"created_at","interval":"day"}`
-- Output: `{"rows":[{"period":"2026-03-01","count":150,"avg_value":"42.5"}]}`
+- **Parameters**: `{"table": "orders", "database": "production"}`
+- **Returns**: Column profiles with `{name, data_type, null_count, null_pct, distinct_count, min_value, max_value, avg_value, top_values}`
 
-**enhanced_health** — "Health of connected databases: PG version, size, uptime."
-- Input: none
-- Output: `[{"name":"prod","pg_version":"PostgreSQL 16.2...","db_size":"1.2 GB","uptime":"..."}]`
+#### summary
 
-### Migration (analyze-only)
+High-level database overview.
 
-**suggest_migration** — "Analyze current schema and return context for migration planning. Returns schema details and FK relationships. NEVER executes DDL."
-- Input: `{"database":"prod","description":"Add soft delete to users table","schema_name":"public"}`
-- Output: `{"current_schema":{...},"foreign_keys":[...],"description":"...","note":"SQL below is a suggestion. NOT executed."}`
+- **Parameters**: `{"database": "production"}` (optional; omit for all connected)
+- **Returns**: `{"summaries": [{database, table_count, total_rows, total_size, index_count, largest_tables}], "errors": [...]}`
 
-## 5. Sync/Async Bridge
+#### trend
 
-Every tool that touches `ConnectionManager` uses `tokio::task::spawn_blocking`:
-- Application errors (bad SQL, table not found) → `CallToolResult::success` with error text (agent sees and retries)
-- Runtime errors (mutex poison, task panic) → `McpError::internal_error`
+Time-series analysis: group rows by a timestamp column at day/week/month/year intervals.
 
-## 6. Approval Mode (Phase 3)
+- **Parameters**: `{"table": "orders", "database": "production", "timestamp_column": "created_at", "interval": "day", "value_column": "amount", "limit": 30}`
+  - `interval`: `day`, `week`, `month`, or `year` (default: `day`)
+  - `value_column`: optional numeric column to compute AVG per period
+  - `limit`: max periods to return
+- **Returns**: `{rows: [{period, count, avg_value}]}`
 
-`--approval-mode auto|confirm`
-- `auto`: all tools execute immediately (read-only enforced)
-- `confirm`: SQL tools return pending approval token, agent re-calls with token
+#### enhanced_health
 
-## 7. Launch
+Health check for all connected databases: PostgreSQL version, database size, uptime, response time.
 
-```bash
-databasecli-mcp -D /project/path
+- **Parameters**: none
+- **Returns**: JSON array of `{name, status, pg_version, db_size, uptime, response_time_ms}`
+
+### Migration Planning
+
+#### suggest_migration
+
+Gather schema context for planning DDL changes. This tool **never executes DDL**. It returns the current schema and foreign key relationships so you can generate migration SQL for the user to review.
+
+- **Parameters**: `{"database": "production", "description": "Add soft delete column to users table", "schema_name": "public"}`
+- **Returns**: `{"current_schema": {...}, "foreign_keys": [...], "description": "...", "note": "..."}`
+
+## Typical Agent Workflow
+
+### 1. Discover and Connect
+
+```
+Agent: Call list_configured_databases
+Agent: Call connect_databases with {"names": ["production"]}
 ```
 
-Claude Desktop `claude_desktop_config.json`:
-```json
-{"mcpServers":{"databasecli":{"command":"databasecli-mcp","args":["-D","/project"]}}}
+### 2. Explore Schema
+
+```
+Agent: Call schema to see all tables
+Agent: Call erd to understand relationships
+Agent: Call sample on a specific table to see data shape
 ```
 
-## 8. Phased Implementation
+### 3. Answer User Questions
 
-- **Phase 1**: Server skeleton + 7 tools (list_configured, connect, disconnect, list_connected, query, schema, sample)
-- **Phase 2**: 7 more tools (analyze, compare, summary, erd, trend, health, suggest_migration)
-- **Phase 3**: Approval mode with token flow
+```
+User: "Show me all tickets for event Ballad Beast"
+
+Agent: Call schema to find relevant tables (events, tickets)
+Agent: Call sample on events to verify column names
+Agent: Call query with {"sql": "SELECT t.* FROM tickets t JOIN events e ON t.event_id = e.id WHERE e.name = 'Ballad Beast'"}
+Agent: Present results to user
+```
+
+### 4. Analyze Data Quality
+
+```
+Agent: Call analyze on a table to see null rates, cardinality
+Agent: Call trend to see how data grows over time
+Agent: Call summary for an overview of database health
+```
+
+### 5. Plan Schema Changes
+
+```
+Agent: Call suggest_migration with description of desired changes
+Agent: Use returned schema context to generate ALTER/CREATE SQL
+Agent: Present migration SQL to user for review (never auto-executed)
+```
+
+## Architecture
+
+```
+AI Agent (Claude, etc.)
+    |
+    | stdio (JSON-RPC)
+    |
+databasecli-mcp (async, tokio)
+    |
+    | Arc<Mutex<ConnectionManager>>
+    | tokio::task::spawn_blocking
+    |
+databasecli-core (sync, postgres crate)
+    |
+    | SET default_transaction_read_only = on
+    | SET statement_timeout = '30s'
+    |
+PostgreSQL
+```
+
+The MCP server is async (tokio + rmcp). The core library is synchronous (postgres crate). The bridge uses `spawn_blocking` to run sync database operations on tokio's blocking thread pool without blocking the event loop. A `Mutex<ConnectionManager>` with poison-recovery protects shared state.
