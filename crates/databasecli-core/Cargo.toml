@@ -1,0 +1,19 @@
+[package]
+name = "databasecli-core"
+description = "Core domain logic for databasecli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+configparser = "3"
+home = "0.5"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

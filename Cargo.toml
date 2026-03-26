@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/databasecli-cli", "crates/databasecli-core", "crates/databasecli-tui"]
+default-members = ["crates/databasecli-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/maximgorbatyuk/databasecli"
+authors = ["Maxim Gorbatyuk"]
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
