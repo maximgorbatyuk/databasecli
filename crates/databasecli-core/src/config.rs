@@ -22,8 +22,18 @@ impl DatabaseConfig {
 }
 
 pub fn resolve_config_path() -> Result<PathBuf, DatabaseCliError> {
+    resolve_config_path_with_base(None)
+}
+
+pub fn resolve_config_path_with_base(base: Option<&str>) -> Result<PathBuf, DatabaseCliError> {
     if let Ok(path) = std::env::var("DATABASECLI_CONFIG_PATH") {
         return Ok(PathBuf::from(path));
+    }
+
+    if let Some(dir) = base {
+        return Ok(PathBuf::from(dir)
+            .join(".databasecli")
+            .join("databases.ini"));
     }
 
     if cfg!(debug_assertions) {
@@ -40,7 +50,11 @@ pub fn resolve_config_path() -> Result<PathBuf, DatabaseCliError> {
 }
 
 pub fn config_exists() -> Result<bool, DatabaseCliError> {
-    let path = resolve_config_path()?;
+    config_exists_with_base(None)
+}
+
+pub fn config_exists_with_base(base: Option<&str>) -> Result<bool, DatabaseCliError> {
+    let path = resolve_config_path_with_base(base)?;
     Ok(path.exists())
 }
 

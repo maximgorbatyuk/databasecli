@@ -1,3 +1,7 @@
+mod connect;
+mod home;
+mod input;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{AppState, Screen};
@@ -39,26 +43,28 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    let code = match key.code {
-        KeyCode::Char(c) => KeyCode::Char(normalize_to_qwerty(c)),
-        other => other,
+    // Don't normalize when in input mode - user is typing text
+    let code = if app.input_mode {
+        key.code
+    } else {
+        match key.code {
+            KeyCode::Char(c) => KeyCode::Char(normalize_to_qwerty(c)),
+            other => other,
+        }
     };
 
     match app.active_screen {
-        Screen::Home => handle_home(app, code),
+        Screen::Home => home::handle_home(app, code),
         Screen::CreateConfig => handle_create_config(app, code),
-        Screen::StoredDatabases => handle_stored_databases(app, code),
-        Screen::DatabaseHealth => handle_database_health(app, code),
-    }
-}
-
-fn handle_home(app: &mut AppState, code: KeyCode) {
-    match code {
-        KeyCode::Char('q') => app.quit(),
-        KeyCode::Up | KeyCode::Char('k') => app.move_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-        KeyCode::Enter => app.activate_selected(),
-        _ => {}
+        Screen::Connect => connect::handle_connect(app, code),
+        Screen::StoredDatabases
+        | Screen::DatabaseHealth
+        | Screen::Schema
+        | Screen::Summary
+        | Screen::Erd => handle_scroll_screen(app, code),
+        Screen::Query | Screen::Sample | Screen::Analyze | Screen::Compare | Screen::Trend => {
+            input::handle_input_screen(app, code)
+        }
     }
 }
 
@@ -71,17 +77,7 @@ fn handle_create_config(app: &mut AppState, code: KeyCode) {
     }
 }
 
-fn handle_stored_databases(app: &mut AppState, code: KeyCode) {
-    match code {
-        KeyCode::Char('q') => app.quit(),
-        KeyCode::Esc => app.go_home(),
-        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
-        _ => {}
-    }
-}
-
-fn handle_database_health(app: &mut AppState, code: KeyCode) {
+fn handle_scroll_screen(app: &mut AppState, code: KeyCode) {
     match code {
         KeyCode::Char('q') => app.quit(),
         KeyCode::Esc => app.go_home(),

@@ -26,4 +26,34 @@ pub enum DatabaseCliError {
 
     #[error("could not determine home directory")]
     NoHomeDirectory,
+
+    #[error("already connected to '{0}'")]
+    AlreadyConnected(String),
+
+    #[error("not connected to '{0}'")]
+    NotConnected(String),
+
+    #[error("no active connections")]
+    NoConnections,
+
+    #[error("query failed: {0}")]
+    QueryFailed(String),
+
+    #[error("read-only violation: statement begins with '{0}' which is not allowed")]
+    ReadOnlyViolation(String),
+
+    #[error("empty query")]
+    EmptyQuery,
+
+    #[error("invalid identifier '{0}': must match [a-zA-Z_][a-zA-Z0-9_]*")]
+    InvalidIdentifier(String),
+
+    #[error("table not found: {schema}.{table}")]
+    TableNotFound { schema: String, table: String },
+
+    #[error("invalid interval '{0}': expected day, week, month, or year")]
+    InvalidInterval(String),
+
+    #[error("database error: {0}")]
+    Postgres(#[from] postgres::Error),
 }

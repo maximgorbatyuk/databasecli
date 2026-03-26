@@ -324,6 +324,7 @@ dependencies = [
  "native-tls",
  "postgres",
  "postgres-native-tls",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
