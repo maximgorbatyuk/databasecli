@@ -228,6 +228,7 @@ pub fn run_summary(cli: &Cli) -> Result<()> {
 
 pub fn run_erd(cli: &Cli, schema: &str, format: &str, output: Option<&str>) -> Result<()> {
     let mut manager = establish_connections(cli)?;
+    let mut all_output = String::new();
     for (_, conn) in manager.iter_mut() {
         let result = build_erd(conn, Some(schema))?;
         let formatted = match format {
@@ -235,13 +236,14 @@ pub fn run_erd(cli: &Cli, schema: &str, format: &str, output: Option<&str>) -> R
             "dot" => format_erd_dot(&result),
             _ => format_erd_ascii(&result),
         };
+        all_output.push_str(&formatted);
+    }
 
-        if let Some(path) = output {
-            std::fs::write(path, &formatted)?;
-            println!("ERD written to {path}");
-        } else {
-            print!("{formatted}");
-        }
+    if let Some(path) = output {
+        std::fs::write(path, &all_output)?;
+        println!("ERD written to {path}");
+    } else {
+        print!("{all_output}");
     }
     Ok(())
 }

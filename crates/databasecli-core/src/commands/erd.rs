@@ -1,3 +1,4 @@
+use crate::commands::validate_identifier;
 use crate::connection::LiveConnection;
 use crate::error::DatabaseCliError;
 
@@ -37,6 +38,7 @@ pub fn build_erd(
     schema: Option<&str>,
 ) -> Result<ErdResult, DatabaseCliError> {
     let schema = schema.unwrap_or("public");
+    validate_identifier(schema)?;
 
     // Columns per table
     let col_rows = conn.client.query(

@@ -34,7 +34,7 @@ impl ConnectionManager {
             .map_err(|e| DatabaseCliError::ConnectionFailed(e.to_string()))?;
 
         client
-            .batch_execute("SET default_transaction_read_only = on")
+            .batch_execute("SET default_transaction_read_only = on; SET statement_timeout = '30s'")
             .map_err(|e| DatabaseCliError::QueryFailed(e.to_string()))?;
 
         self.connections.insert(

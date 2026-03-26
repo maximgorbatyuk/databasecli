@@ -1,3 +1,4 @@
+use crate::commands::validate_identifier;
 use crate::connection::LiveConnection;
 use crate::error::DatabaseCliError;
 
@@ -31,6 +32,7 @@ pub fn dump_schema(
     schema_filter: Option<&str>,
 ) -> Result<SchemaResult, DatabaseCliError> {
     let schema = schema_filter.unwrap_or("public");
+    validate_identifier(schema)?;
 
     // Tables with row counts and sizes
     let table_rows = conn.client.query(

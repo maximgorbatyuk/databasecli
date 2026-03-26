@@ -14,6 +14,14 @@ pub struct QueryResultSet {
 
 pub fn validate_readonly(sql: &str) -> Result<(), DatabaseCliError> {
     let stripped = strip_sql_comments(sql);
+
+    // Reject multi-statement queries (semicolons outside string literals)
+    if contains_unquoted_semicolon(&stripped) {
+        return Err(DatabaseCliError::ReadOnlyViolation(
+            "multi-statement queries (containing ';') are not allowed".to_string(),
+        ));
+    }
+
     let first_keyword = stripped
         .split_whitespace()
         .next()
@@ -25,6 +33,35 @@ pub fn validate_readonly(sql: &str) -> Result<(), DatabaseCliError> {
         "" => Err(DatabaseCliError::EmptyQuery),
         other => Err(DatabaseCliError::ReadOnlyViolation(other.to_string())),
     }
+}
+
+fn contains_unquoted_semicolon(sql: &str) -> bool {
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '\'' {
+            // Skip string literal
+            i += 1;
+            while i < len {
+                if chars[i] == '\'' {
+                    if i + 1 < len && chars[i + 1] == '\'' {
+                        i += 2; // escaped quote
+                    } else {
+                        i += 1;
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else if chars[i] == ';' {
+            return true;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn strip_sql_comments(sql: &str) -> String {
@@ -303,5 +340,22 @@ mod tests {
     fn case_insensitive() {
         assert!(validate_readonly("select 1").is_ok());
         assert!(validate_readonly("Select 1").is_ok());
+    }
+
+    #[test]
+    fn rejects_multi_statement_with_semicolon() {
+        assert!(validate_readonly("SELECT 1; DROP TABLE users").is_err());
+        assert!(validate_readonly("SELECT 1;DELETE FROM users").is_err());
+    }
+
+    #[test]
+    fn allows_semicolon_inside_string_literal() {
+        assert!(validate_readonly("SELECT 'hello;world'").is_ok());
+        assert!(validate_readonly("SELECT 'a;b' FROM users").is_ok());
+    }
+
+    #[test]
+    fn rejects_nested_comment_hiding_mutation() {
+        assert!(validate_readonly("/* /* */ DELETE */ SELECT 1").is_err());
     }
 }

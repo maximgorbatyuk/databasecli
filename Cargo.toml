@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/databasecli-cli", "crates/databasecli-core", "crates/databasecli-tui"]
+members = ["crates/databasecli-cli", "crates/databasecli-core", "crates/databasecli-mcp", "crates/databasecli-tui"]
 default-members = ["crates/databasecli-cli"]
 resolver = "2"
 
