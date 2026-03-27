@@ -72,7 +72,7 @@ Add to `claude_desktop_config.json`:
 
 ### Claude Code
 
-Add to `.mcp.json` in your project root:
+Add to `.claude/settings.local.json` in your project (machine-specific, not committed):
 
 ```json
 {
@@ -84,6 +84,8 @@ Add to `.mcp.json` in your project root:
   }
 }
 ```
+
+Or to `.mcp.json` in your project root if you want to share the config with your team.
 
 For the full tools reference and security model, see [`docs/mcp.md`](docs/mcp.md).
 
