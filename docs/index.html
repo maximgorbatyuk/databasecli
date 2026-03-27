@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>databasecli — Manage your databases from the terminal.</title>
+  <meta name="description" content="A Rust CLI/TUI tool for managing PostgreSQL database connections. Health checks, connection management, and an interactive terminal UI.">
+  <meta name="keywords" content="postgresql, database management, database cli, database health check, connection manager, rust cli, terminal ui, tui, postgres, developer tools, open source, homebrew">
+  <meta name="author" content="Maxim Gorbatyuk">
+  <meta name="robots" content="index, follow">
+  <meta property="og:site_name" content="databasecli">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:title" content="databasecli — Manage your databases from the terminal.">
+  <meta property="og:description" content="A Rust CLI/TUI tool for managing PostgreSQL database connections. Health checks, connection management, and an interactive terminal UI.">
+  <meta property="og:url" content="https://maximgorbatyuk.github.io/databasecli/">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://maximgorbatyuk.github.io/databasecli/og.svg">
+  <meta property="og:image:alt" content="databasecli — Manage your databases from the terminal.">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="databasecli — Manage your databases from the terminal.">
+  <meta name="twitter:description" content="A Rust CLI/TUI tool for managing PostgreSQL database connections. Health checks, connection management, and an interactive terminal UI.">
+  <meta name="twitter:image" content="https://maximgorbatyuk.github.io/databasecli/og.svg">
+  <link rel="canonical" href="https://maximgorbatyuk.github.io/databasecli/">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' font-family='monospace' fill='%2322c55e'>D</text></svg>">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "databasecli",
+    "description": "A Rust CLI/TUI tool for managing PostgreSQL database connections. Health checks, connection management, and an interactive terminal UI.",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Linux, Windows",
+    "url": "https://maximgorbatyuk.github.io/databasecli/",
+    "downloadUrl": "https://github.com/maximgorbatyuk/databasecli/releases",
+    "softwareVersion": "",
+    "license": "https://opensource.org/licenses/MIT",
+    "author": {
+      "@type": "Person",
+      "name": "maximgorbatyuk",
+      "url": "https://github.com/maximgorbatyuk"
+    },
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "sourceCodeRepository": "https://github.com/maximgorbatyuk/databasecli",
+    "programmingLanguage": "Rust",
+    "keywords": ["postgresql", "database management", "database cli", "health check", "connection manager", "rust cli", "terminal ui"]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "What is databasecli?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "databasecli is a Rust CLI/TUI tool for managing PostgreSQL database connections. It provides health checks, connection listing, and an interactive terminal UI for managing all your databases in one place."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How do I install databasecli?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "On macOS, install via Homebrew: brew install maximgorbatyuk/tap/databasecli. Cross-platform, install via Cargo: cargo install databasecli. Supports macOS, Linux, and Windows."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Who is databasecli for?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "databasecli is built for backend developers managing multiple database connections, DBAs monitoring database health, and DevOps engineers who need quick connectivity checks from the terminal."
+        }
+      }
+    ]
+  }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap"></noscript>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <a href="#main" class="skip-link">Skip to main content</a>
+
+  <!-- Hero -->
+  <header class="hero" id="top">
+    <div class="container">
+      <pre class="hero-logo" role="img" aria-label="databasecli">     _       _        _                         _ _
+  __| | __ _| |_ __ _| |__   __ _ ___  ___  ___| (_)
+ / _` |/ _` | __/ _` | '_ \ / _` / __|/ _ \/ __| | |
+| (_| | (_| | || (_| | |_) | (_| \__ \  __/ (__| | |
+ \__,_|\__,_|\__\__,_|_.__/ \__,_|___/\___|\___|_|_|</pre>
+      <h1><span class="typing-cursor" data-typing="Manage your databases from the terminal.">Manage your databases from the terminal.</span></h1>
+      <p class="hero-description">
+        A Rust CLI/TUI tool for managing PostgreSQL connections.<br>
+        Health checks. Connection management. Interactive TUI. Zero config.
+      </p>
+      <div class="hero-ctas">
+        <a href="#install" class="btn btn-primary">$ brew install databasecli</a>
+        <a href="https://github.com/maximgorbatyuk/databasecli" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub &rarr;</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- Who is it for -->
+    <section class="section-green">
+      <div class="container">
+        <h2 class="section-title">Who is it for?</h2>
+        <p class="section-subtitle">Built for anyone who works with PostgreSQL databases daily.</p>
+        <div class="persona-grid">
+          <div class="persona-card animate-on-scroll">
+            <div class="persona-icon" aria-hidden="true">[BE]</div>
+            <h3>Backend Developers</h3>
+            <p>Manage connections to multiple databases across environments. Switch between dev, staging, and production without remembering connection strings.</p>
+          </div>
+          <div class="persona-card animate-on-scroll">
+            <div class="persona-icon" aria-hidden="true">[db]</div>
+            <h3>Database Administrators</h3>
+            <p>Monitor database health at a glance. Run quick connectivity checks across your entire fleet and spot issues before they become incidents.</p>
+          </div>
+          <div class="persona-card animate-on-scroll">
+            <div class="persona-icon" aria-hidden="true">[ops]</div>
+            <h3>DevOps Engineers</h3>
+            <p>Integrate health checks into your workflow. Script database connectivity verification or use the TUI for interactive troubleshooting.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section>
+      <div class="container">
+        <h2 class="section-title">Features</h2>
+        <p class="section-subtitle">Simple, fast, and focused on what matters.</p>
+        <div class="features-grid">
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[pg]</div>
+            <h3>PostgreSQL Connections</h3>
+            <p>Store and manage multiple PostgreSQL connection configs. One INI file, all your databases in one place.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[ok]</div>
+            <h3>Health Checks</h3>
+            <p>Verify database connectivity with a single command. 5-second timeout keeps checks fast and responsive.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[TUI]</div>
+            <h3>Interactive TUI</h3>
+            <p>Full-screen terminal UI for browsing connections and running health checks with real-time feedback.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[ini]</div>
+            <h3>INI Config</h3>
+            <p>Human-readable INI format for database configs. Easy to edit, version, and share across your team.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[>_]</div>
+            <h3>CLI &amp; TUI Modes</h3>
+            <p>Use subcommands for scripting or launch the interactive TUI for hands-on management. Same tool, two interfaces.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[bg]</div>
+            <h3>Background Checks</h3>
+            <p>TUI runs health checks on a background thread. The UI stays responsive while connections are verified.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[~/]</div>
+            <h3>Cross-Platform</h3>
+            <p>Runs on macOS, Linux, and Windows. Built with Rust for native performance on every platform.</p>
+          </div>
+          <div class="feature-card animate-on-scroll">
+            <div class="feature-icon" aria-hidden="true">[0s]</div>
+            <h3>Zero Config Start</h3>
+            <p>Missing config file? No crash. Just a helpful message and an empty list. Add databases when you're ready.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Installation -->
+    <section id="install" class="section-green">
+      <div class="container">
+        <h2 class="section-title">Installation</h2>
+        <p class="section-subtitle">Two ways to get started.</p>
+        <div class="install-grid">
+          <div>
+            <p class="install-label">Homebrew (macOS)</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Terminal</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="prompt">$</span> brew install maximgorbatyuk/tap/databasecli
+
+<span class="comment"># Verify installation</span>
+<span class="prompt">$</span> databasecli <span class="flag">--version</span>
+databasecli x.y.z</pre>
+              </div>
+            </div>
+          </div>
+          <div>
+            <p class="install-label">Cargo (cross-platform)</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Terminal</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="prompt">$</span> cargo install databasecli
+
+<span class="comment"># Verify installation</span>
+<span class="prompt">$</span> databasecli <span class="flag">--version</span>
+databasecli x.y.z</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="install-note">macOS, Linux, and Windows. Built with cargo-dist.</p>
+      </div>
+    </section>
+
+    <!-- Usage -->
+    <section>
+      <div class="container">
+        <h2 class="section-title">Usage</h2>
+        <p class="section-subtitle">Talk to your databases with AI, use the CLI, or launch the TUI.</p>
+        <div class="usage-examples">
+
+          <div>
+            <p class="usage-label">Set up MCP for Claude Code in one command</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">~/projects/my-app</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="prompt">$</span> databasecli init
+
+<span style="color:#22c55e">Created</span>  ~/.databasecli/databases.ini
+<span style="color:#22c55e">Created</span>  .mcp.json
+
+<span class="comment"># That's it. Claude Code can now talk to your databases.</span>
+<span class="comment"># Edit databases.ini to add your connections, then ask Claude:</span></pre>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="usage-label">Ask Claude about your database in plain English</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Claude Code</span>
+              </div>
+              <div class="terminal-body">
+<pre><span style="color:#c084fc">You:</span>  What tables do I have in the staging database?
+
+<span style="color:#22c55e">Claude:</span>  I found 12 tables in staging:
+
+        users          4,832 rows    1.2 MB
+        orders        18,294 rows    8.4 MB
+        products       1,047 rows    0.3 MB
+        payments      16,511 rows    5.1 MB
+        ...
+
+<span style="color:#c084fc">You:</span>  Show me users who signed up this week
+
+<span style="color:#22c55e">Claude:</span>  Running query on staging...
+
+        email                  created_at
+        --------------------   ----------------
+        alice@example.com      2026-03-25 09:14
+        bob@startup.io         2026-03-24 14:33
+        carol@dev.team         2026-03-23 11:07
+
+        3 users signed up since Monday.</pre>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="usage-label">Explore schema and plan migrations with AI</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Claude Code</span>
+              </div>
+              <div class="terminal-body">
+<pre><span style="color:#c084fc">You:</span>  Draw me the entity-relationship diagram
+       for orders, products, and payments
+
+<span style="color:#22c55e">Claude:</span>  Here's the ERD in Mermaid syntax:
+
+        erDiagram
+          orders ||--o{ payments : has
+          orders }o--|| products : contains
+          orders { int id PK; int user_id FK; ... }
+          payments { int id PK; int order_id FK; ... }
+          products { int id PK; text name; ... }
+
+<span style="color:#c084fc">You:</span>  I need to add a "discount_code" column to orders.
+       What should the migration look like?
+
+<span style="color:#22c55e">Claude:</span>  Based on the current schema, here's a safe
+        migration:
+
+        ALTER TABLE orders
+          ADD COLUMN discount_code VARCHAR(32);
+        CREATE INDEX idx_orders_discount_code
+          ON orders (discount_code)
+          WHERE discount_code IS NOT NULL;
+
+        The partial index keeps it lightweight since
+        most orders won't have a discount code.</pre>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="usage-label">Launch the interactive TUI</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Terminal</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="line-num">1</span><span class="prompt">$</span> databasecli
+<span class="line-num">2</span><span class="comment"># or explicitly:</span>
+<span class="line-num">3</span><span class="prompt">$</span> databasecli tui</pre>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="usage-label">List all stored database connections</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Terminal</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="prompt">$</span> databasecli list
+
+Databases:
+  production   localhost:5432/myapp      (admin)
+  staging      staging.db:5432/myapp     (admin)
+  development  localhost:5433/myapp_dev  (dev_user)</pre>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="usage-label">Check health of all databases</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">Terminal</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="prompt">$</span> databasecli health
+
+Health Check Results:
+  production   <span style="color:#22c55e">OK</span>      12ms
+  staging      <span style="color:#22c55e">OK</span>      45ms
+  development  <span style="color:#ef4444">FAIL</span>    connection refused</pre>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="usage-label">Configure your databases</p>
+            <div class="terminal-window animate-on-scroll">
+              <div class="terminal-header" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="terminal-title">~/.databasecli/databases.ini</span>
+              </div>
+              <div class="terminal-body">
+<pre><span class="line-num">1</span><span class="flag">[production]</span>
+<span class="line-num">2</span>host = localhost
+<span class="line-num">3</span>port = 5432
+<span class="line-num">4</span>user = admin
+<span class="line-num">5</span>password = secret123
+<span class="line-num">6</span>dbname = myapp
+<span class="line-num">7</span>
+<span class="line-num">8</span><span class="flag">[staging]</span>
+<span class="line-num">9</span>host = staging.db
+<span class="line-num">10</span>port = 5432
+<span class="line-num">11</span>user = admin
+<span class="line-num">12</span>password = staging_pass
+<span class="line-num">13</span>dbname = myapp</pre>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Demo -->
+    <section class="section-green">
+      <div class="container">
+        <h2 class="section-title">See it in action</h2>
+        <p class="section-subtitle">Real workflow from setup to health check.</p>
+        <div class="terminal-window animate-on-scroll">
+          <div class="terminal-header" aria-hidden="true">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+            <span class="terminal-title">Terminal</span>
+          </div>
+          <div class="terminal-body">
+<pre><span class="prompt">$</span> databasecli list
+
+Databases:
+  production   localhost:5432/myapp      (admin)
+  staging      staging.db:5432/myapp     (admin)
+  development  localhost:5433/myapp_dev  (dev_user)
+
+<span class="prompt">$</span> databasecli health
+
+Health Check Results:
+  production   <span style="color:#22c55e">OK</span>      12ms
+  staging      <span style="color:#22c55e">OK</span>      45ms
+  development  <span style="color:#ef4444">FAIL</span>    connection refused
+
+<span class="comment"># Launch the TUI for interactive management</span>
+<span class="prompt">$</span> databasecli</pre>
+          </div>
+        </div>
+        <div class="hero-ctas cta-center">
+          <a href="https://github.com/maximgorbatyuk/databasecli" class="btn btn-secondary" target="_blank" rel="noopener">Star on GitHub &rarr;</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-columns">
+        <div>
+          <pre class="footer-logo" role="img" aria-label="databasecli">     _       _        _                         _ _
+  __| | __ _| |_ __ _| |__   __ _ ___  ___  ___| (_)
+ / _` |/ _` | __/ _` | '_ \ / _` / __|/ _ \/ __| | |
+| (_| | (_| | || (_| | |_) | (_| \__ \  __/ (__| | |
+ \__,_|\__,_|\__\__,_|_.__/ \__,_|___/\___|\___|_|_|</pre>
+          <p class="footer-slogan">Manage your databases from the terminal.</p>
+          <p>Fast, simple, no fuss.</p>
+        </div>
+        <div>
+          <h3 class="footer-col-title">Our projects</h3>
+          <ul>
+            <li><a href="https://repolyze.app/">Repolyze</a></li>
+            <li><a href="https://techinterview.space/">techinterview.space</a></li>
+            <li><a href="https://evchargetracker.app/">EV Charge Tracker (iOS)</a></li>
+            <li><a href="https://mgorbatyuk.dev/journey-wallet/">Journey Wallet (iOS)</a></li>
+            <li><a href="https://mgorbatyuk.dev/slothy-terminal/">Slothy Terminal (macOS)</a></li>
+          </ul>
+        </div>
+        <div>
+          <h3 class="footer-col-title">GitHub</h3>
+          <ul>
+            <li><a href="https://github.com/maximgorbatyuk/databasecli/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+            <li><a href="https://github.com/maximgorbatyuk/databasecli/issues" target="_blank" rel="noopener">Issues</a></li>
+            <li><a href="https://github.com/maximgorbatyuk/databasecli/releases" target="_blank" rel="noopener">Releases</a></li>
+          </ul>
+        </div>
+      </div>
+      <hr>
+      <p class="footer-credit">Made with <span class="footer-heart" aria-hidden="true">&#9829;</span> and plenty of coffee breaks by <a href="https://mgorbatyuk.dev" target="_blank" rel="noopener">Maxim Gorbatyuk</a></p>
+      <p class="back-to-top-wrap"><a href="#top" class="back-to-top">^ top</a></p>
+    </div>
+  </footer>
+
+  <script>
+    // Typing animation
+    document.addEventListener('DOMContentLoaded', () => {
+      const el = document.querySelector('[data-typing]');
+      if (!el) return;
+
+      const text = el.getAttribute('data-typing');
+      let i = 0;
+
+      // Respect reduced motion
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        el.textContent = text;
+        return;
+      }
+
+      // Clear fallback text before animating
+      el.textContent = '';
+
+      function type() {
+        if (i < text.length) {
+          el.textContent += text.charAt(i);
+          i++;
+          setTimeout(type, 50);
+        }
+      }
+
+      setTimeout(type, 400);
+    });
+
+    // Scroll-triggered fade-in
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('visible');
+              observer.unobserve(entry.target);
+            }
+          });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.animate-on-scroll').forEach(el => {
+          observer.observe(el);
+        });
+      } else {
+        document.querySelectorAll('.animate-on-scroll').forEach(el => {
+          el.classList.add('visible');
+        });
+      }
+    });
+  </script>
+
+</body>
+</html>
