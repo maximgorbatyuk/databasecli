@@ -26,6 +26,7 @@ pub enum Screen {
     Erd,
     Compare,
     Trend,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub enum MenuItem {
     Erd,
     Compare,
     Trend,
+    Help,
 }
 
 impl MenuItem {
@@ -59,6 +61,7 @@ impl MenuItem {
             MenuItem::Erd => "Entity-relationship diagram: PKs and FKs",
             MenuItem::Compare => "Same query across all connected databases",
             MenuItem::Trend => "Time-series: counts/averages by interval",
+            MenuItem::Help => "Commands, keys, config, MCP, security reference",
         }
     }
 
@@ -76,6 +79,7 @@ impl MenuItem {
             MenuItem::Erd => Screen::Erd,
             MenuItem::Compare => Screen::Compare,
             MenuItem::Trend => Screen::Trend,
+            MenuItem::Help => Screen::Help,
         }
     }
 
@@ -109,6 +113,7 @@ impl fmt::Display for MenuItem {
             MenuItem::Erd => write!(f, "ERD"),
             MenuItem::Compare => write!(f, "Compare"),
             MenuItem::Trend => write!(f, "Trend"),
+            MenuItem::Help => write!(f, "Help"),
         }
     }
 }
@@ -186,6 +191,7 @@ impl AppState {
         menu_items.push(MenuItem::Erd);
         menu_items.push(MenuItem::Compare);
         menu_items.push(MenuItem::Trend);
+        menu_items.push(MenuItem::Help);
 
         let current_dir = directory.clone().unwrap_or_else(|| {
             std::env::current_dir()

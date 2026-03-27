@@ -61,7 +61,8 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) {
         | Screen::DatabaseHealth
         | Screen::Schema
         | Screen::Summary
-        | Screen::Erd => handle_scroll_screen(app, code),
+        | Screen::Erd
+        | Screen::Help => handle_scroll_screen(app, code),
         Screen::Query | Screen::Sample | Screen::Analyze | Screen::Compare | Screen::Trend => {
             input::handle_input_screen(app, code)
         }

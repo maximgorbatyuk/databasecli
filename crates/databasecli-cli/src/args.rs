@@ -4,7 +4,8 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "databasecli",
     about = "PostgreSQL database connection manager",
-    version
+    version,
+    after_help = "For a full reference (commands, keys, config, MCP, security), run: databasecli reference"
 )]
 pub struct Cli {
     /// Working directory to display
@@ -93,6 +94,9 @@ pub enum Commands {
         #[arg(long)]
         limit: Option<i64>,
     },
+    /// Show full help reference: commands, keys, config, MCP, security
+    #[command(name = "reference")]
+    Reference,
     /// Preview rows from a table
     Sample {
         /// Table name

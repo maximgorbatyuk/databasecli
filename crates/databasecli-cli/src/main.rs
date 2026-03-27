@@ -27,6 +27,7 @@ fn main() -> Result<()> {
             ref format,
             ref output,
         }) => run::run_erd(&cli, schema, format, output.as_deref())?,
+        Some(Commands::Reference) => run::run_help(),
         Some(Commands::Compare { ref sql }) => run::run_compare(&cli, sql)?,
         Some(Commands::Trend {
             ref table,

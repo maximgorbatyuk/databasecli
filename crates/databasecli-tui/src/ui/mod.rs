@@ -5,6 +5,7 @@ mod create_config;
 mod databases;
 mod erd;
 mod health;
+mod help;
 mod home;
 mod query;
 mod sample;
@@ -34,5 +35,6 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         Screen::Erd => erd::draw_erd(frame, app, area),
         Screen::Compare => compare::draw_compare(frame, app, area),
         Screen::Trend => trend::draw_trend(frame, app, area),
+        Screen::Help => help::draw_help(frame, app, area),
     }
 }

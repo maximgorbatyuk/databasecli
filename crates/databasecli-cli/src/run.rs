@@ -17,7 +17,14 @@ use databasecli_core::config::{
 use databasecli_core::connection::ConnectionManager;
 use databasecli_core::health::{check_all_health, format_health_table};
 
+use databasecli_core::help::{build_help_sections, format_help_text};
+
 use crate::args::Cli;
+
+pub fn run_help() {
+    let sections = build_help_sections();
+    print!("{}", format_help_text(&sections));
+}
 
 fn establish_connections(cli: &Cli) -> Result<ConnectionManager> {
     let path = resolve_config_path_with_base(cli.directory.as_deref())?;
