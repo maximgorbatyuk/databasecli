@@ -140,6 +140,21 @@ pub fn cell_to_string(row: &postgres::Row, idx: usize) -> String {
         Type::JSON | Type::JSONB => row
             .get::<_, Option<serde_json::Value>>(idx)
             .map_or("NULL".to_string(), |v| v.to_string()),
+        Type::UUID => row
+            .get::<_, Option<uuid::Uuid>>(idx)
+            .map_or("NULL".to_string(), |v| v.to_string()),
+        Type::TIMESTAMPTZ => row
+            .get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx)
+            .map_or("NULL".to_string(), |v| v.to_rfc3339()),
+        Type::TIMESTAMP => row
+            .get::<_, Option<chrono::NaiveDateTime>>(idx)
+            .map_or("NULL".to_string(), |v| v.to_string()),
+        Type::DATE => row
+            .get::<_, Option<chrono::NaiveDate>>(idx)
+            .map_or("NULL".to_string(), |v| v.to_string()),
+        Type::TIME => row
+            .get::<_, Option<chrono::NaiveTime>>(idx)
+            .map_or("NULL".to_string(), |v| v.to_string()),
         _ => {
             // Fallback: try as text
             match row.try_get::<_, Option<String>>(idx) {
