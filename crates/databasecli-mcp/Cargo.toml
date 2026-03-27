@@ -22,3 +22,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package.metadata.wix]
+upgrade-guid = "90F6D606-8BCD-4DEA-92DE-0F50910B8594"
+path-guid = "C1CC3CD8-23EB-4EBF-A81F-097C2E6C3CCA"
+license = false
+eula = false
