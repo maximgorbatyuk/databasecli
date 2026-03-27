@@ -233,10 +233,7 @@ mod tests {
     fn tilde_expansion_in_base_path() {
         let home = home::home_dir().unwrap();
         let path = resolve_config_path_with_base(Some("~/projects/test")).unwrap();
-        assert_eq!(
-            path,
-            home.join("projects/test/.databasecli/databases.ini")
-        );
+        assert_eq!(path, home.join("projects/test/.databasecli/databases.ini"));
     }
 
     #[test]

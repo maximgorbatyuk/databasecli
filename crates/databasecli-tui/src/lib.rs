@@ -138,8 +138,7 @@ fn run_loop(
                             } else {
                                 msgs.join(" | ")
                             };
-                            let config_created =
-                                result.config_action == FileAction::Created;
+                            let config_created = result.config_action == FileAction::Created;
                             app.on_init_completed(message, config_created);
                         }
                         Err(e) => app.error_message = Some(e.to_string()),
