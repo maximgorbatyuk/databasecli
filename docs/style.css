@@ -51,7 +51,7 @@ body {
 }
 
 .hero-logo {
-  color: var(--accent-green);
+  color: #166534;
   font-size: clamp(0.45rem, 2.2vw, 0.85rem);
   line-height: 1.2;
   margin-bottom: 24px;
@@ -387,7 +387,7 @@ footer a:hover {
 }
 
 .footer-logo {
-  color: var(--accent-green);
+  color: #166534;
   font-size: clamp(0.35rem, 1.8vw, 0.65rem);
   line-height: 1.2;
   margin-bottom: 12px;

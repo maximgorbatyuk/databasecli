@@ -1,6 +1,6 @@
 # databasecli
 
-A CLI and TUI tool for managing and exploring PostgreSQL databases. Includes an MCP server for AI agent access.
+Manage your databases with AI agents. A CLI, TUI, and MCP server providing secure read-only access to PostgreSQL databases.
 
 ## For Whom
 
