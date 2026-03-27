@@ -13,17 +13,54 @@ A CLI and TUI tool for managing and exploring PostgreSQL databases. Includes an 
 
 ## Installation
 
+### macOS (Homebrew)
+
 ```bash
 brew tap maximgorbatyuk/tap
 brew install databasecli
+brew install databasecli-mcp   # MCP server for AI agents
 
-# Check installation
 databasecli --version
+```
+
+### Linux
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/maximgorbatyuk/databasecli/releases/latest/download/databasecli-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/maximgorbatyuk/databasecli/releases/latest/download/databasecli-mcp-installer.sh | sh
+```
+
+### Windows
+
+PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/maximgorbatyuk/databasecli/releases/latest/download/databasecli-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/maximgorbatyuk/databasecli/releases/latest/download/databasecli-mcp-installer.ps1 | iex"
+```
+
+MSI installers are also available on the [releases page](https://github.com/maximgorbatyuk/databasecli/releases).
+
+### From source
+
+```bash
+cargo install --git https://github.com/maximgorbatyuk/databasecli databasecli
+cargo install --git https://github.com/maximgorbatyuk/databasecli databasecli-mcp
 ```
 
 ## Quick Start
 
-Create a config file at `~/.databasecli/databases.ini`:
+### Option 1: Call `init` command
+
+```bash
+databasecli init
+```
+
+The command will create .ini file in directory `<project_path>/.databasecli/databases.ini`. Also, this command will write MCP server to the folder.
+
+### Option 2: Manual setup
+
+1. Create a config file at `~/.databasecli/databases.ini` (or `<project>/.databasecli/databases.ini` when using `-D`):
 
 ```ini
 [production]
@@ -41,7 +78,20 @@ password = secret456
 dbname = myapp_staging
 ```
 
-Then run:
+2. Create `.mcp.json` in your project root to enable AI agent access:
+
+```json
+{
+  "mcpServers": {
+    "databasecli": {
+      "command": "databasecli-mcp",
+      "args": ["-D", "."]
+    }
+  }
+}
+```
+
+3. Run:
 
 ```bash
 databasecli                              # launch TUI

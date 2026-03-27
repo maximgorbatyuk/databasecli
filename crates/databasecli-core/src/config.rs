@@ -21,6 +21,25 @@ impl DatabaseConfig {
     }
 }
 
+/// Expand a leading `~` to the user's home directory.
+pub fn expand_tilde(dir: &str) -> Result<PathBuf, DatabaseCliError> {
+    if let Some(rest) = dir.strip_prefix('~') {
+        let home = home::home_dir().ok_or(DatabaseCliError::NoHomeDirectory)?;
+        let suffix = rest.strip_prefix('/').unwrap_or(rest);
+        Ok(home.join(suffix))
+    } else {
+        Ok(PathBuf::from(dir))
+    }
+}
+
+/// Resolve the base directory: expand tilde if present, or fall back to cwd.
+pub fn resolve_base_dir(directory: Option<&str>) -> Result<PathBuf, DatabaseCliError> {
+    match directory {
+        Some(dir) => expand_tilde(dir),
+        None => std::env::current_dir().map_err(DatabaseCliError::Io),
+    }
+}
+
 pub fn resolve_config_path() -> Result<PathBuf, DatabaseCliError> {
     resolve_config_path_with_base(None)
 }
@@ -31,9 +50,8 @@ pub fn resolve_config_path_with_base(base: Option<&str>) -> Result<PathBuf, Data
     }
 
     if let Some(dir) = base {
-        return Ok(PathBuf::from(dir)
-            .join(".databasecli")
-            .join("databases.ini"));
+        let expanded = expand_tilde(dir)?;
+        return Ok(expanded.join(".databasecli").join("databases.ini"));
     }
 
     if cfg!(debug_assertions) {
@@ -209,6 +227,32 @@ mod tests {
         );
         let err = load_databases(&path).unwrap_err();
         assert!(err.to_string().contains("invalid port"));
+    }
+
+    #[test]
+    fn tilde_expansion_in_base_path() {
+        let home = home::home_dir().unwrap();
+        let path = resolve_config_path_with_base(Some("~/projects/test")).unwrap();
+        assert_eq!(
+            path,
+            home.join("projects/test/.databasecli/databases.ini")
+        );
+    }
+
+    #[test]
+    fn bare_tilde_expansion() {
+        let home = home::home_dir().unwrap();
+        let path = resolve_config_path_with_base(Some("~")).unwrap();
+        assert_eq!(path, home.join(".databasecli/databases.ini"));
+    }
+
+    #[test]
+    fn absolute_base_path_unchanged() {
+        let path = resolve_config_path_with_base(Some("/tmp/myproject")).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/myproject/.databasecli/databases.ini")
+        );
     }
 
     #[test]

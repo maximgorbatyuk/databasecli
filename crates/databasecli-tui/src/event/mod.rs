@@ -56,6 +56,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) {
     match app.active_screen {
         Screen::Home => home::handle_home(app, code),
         Screen::CreateConfig => handle_create_config(app, code),
+        Screen::Init => handle_init(app, code),
         Screen::Connect => connect::handle_connect(app, code),
         Screen::StoredDatabases
         | Screen::DatabaseHealth
@@ -74,6 +75,15 @@ fn handle_create_config(app: &mut AppState, code: KeyCode) {
         KeyCode::Char('q') => app.quit(),
         KeyCode::Esc => app.go_home(),
         KeyCode::Enter => app.confirm_create_config(),
+        _ => {}
+    }
+}
+
+fn handle_init(app: &mut AppState, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') => app.quit(),
+        KeyCode::Esc => app.go_home(),
+        KeyCode::Enter => app.confirm_init(),
         _ => {}
     }
 }

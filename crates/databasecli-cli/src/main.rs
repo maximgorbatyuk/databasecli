@@ -11,8 +11,9 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Tui) | None => databasecli_tui::run(cli.directory)?,
-        Some(Commands::List) => run::run_list()?,
-        Some(Commands::Health) => run::run_health()?,
+        Some(Commands::Init) => run::run_init(&cli)?,
+        Some(Commands::List) => run::run_list(&cli)?,
+        Some(Commands::Health) => run::run_health(&cli)?,
         Some(Commands::ListDatabases) => run::run_list_databases(&cli)?,
         Some(Commands::HealthCheck) => run::run_health_check(&cli)?,
         Some(Commands::Schema { ref schema }) => run::run_schema(&cli, schema)?,

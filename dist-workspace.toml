@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo:crates/databasecli-cli"]
+members = ["cargo:crates/databasecli-cli", "cargo:crates/databasecli-mcp"]
 
 [dist]
 cargo-dist-version = "0.31.0"

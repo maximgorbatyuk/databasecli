@@ -24,6 +24,10 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                     description: "Launch interactive TUI (explicit)".to_string(),
                 },
                 HelpItem {
+                    name: "databasecli init [-D <path>]".to_string(),
+                    description: "Create databases.ini and .mcp.json (idempotent)".to_string(),
+                },
+                HelpItem {
                     name: "databasecli list".to_string(),
                     description: "List all stored database connections from config".to_string(),
                 },
@@ -179,7 +183,7 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                 },
                 HelpItem {
                     name: "Init config".to_string(),
-                    description: "databasecli-mcp --init [-D <path>]".to_string(),
+                    description: "databasecli init [-D <path>] (creates databases.ini + .mcp.json)".to_string(),
                 },
                 HelpItem {
                     name: "Run".to_string(),

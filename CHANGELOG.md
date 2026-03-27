@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-03-27
+
+### Added
+
+- **`init` command**: New `databasecli init [-D <path>]` subcommand that bootstraps a project in one step — creates `databases.ini` template if missing and creates or updates `.mcp.json` with the databasecli MCP server entry. Idempotent: safe to run multiple times. Available as both a CLI subcommand and a TUI menu item ("Initialize Project").
+- **`databasecli-mcp` in releases**: The MCP server binary is now included in cargo-dist releases alongside the main CLI. Install via `brew install databasecli-mcp`, the shell/PowerShell installers, or MSI.
+- **Tilde expansion in `-D` flag**: Paths like `~/projects/myapp` are now correctly expanded to the user's home directory. Previously, MCP clients that invoke binaries without a shell would pass `~` as a literal character, causing config resolution to fail.
+- **Cross-platform install instructions**: README now documents installation for macOS (Homebrew), Linux (shell installer), Windows (PowerShell + MSI), and from source.
+
+### Changed
+
+- **`list` and `health` commands now respect `-D`**: Previously these two subcommands ignored the `-D` directory flag and always used the default config path. They now resolve config relative to the specified directory, consistent with all other subcommands.
+- **`init` replaces `databasecli-mcp --init`**: The `--init` flag has been removed from the MCP binary. Use `databasecli init` instead, which also handles `.mcp.json` setup.
+- **`FileAction` enum replaces boolean flags**: Init results now report `Created`, `Updated`, or `Unchanged` per file, giving accurate user feedback (e.g., "already configured" on no-op instead of misleading "updated").
+- **Shared tilde expansion**: Extracted `expand_tilde()` and `resolve_base_dir()` helpers in `config.rs`, eliminating duplicated path expansion logic between config resolution and init.
+- **TUI "Initialize Project" removes stale menu item**: When init creates the config file, the conditional "Create database.ini" menu item is removed from the home screen.
+- **TUI init screen shows resolved paths**: Both the config path and `.mcp.json` path are displayed as fully resolved absolute paths, not raw `-D` input.
+- **Updated help reference**: `databasecli reference` now lists the `init` command and points MCP init instructions to `databasecli init` instead of the removed `--init` flag.
+
 ## [0.1.0] - 2026-03-27
 
 ### Added

@@ -26,7 +26,8 @@ use databasecli_core::commands::schema::dump_schema;
 use databasecli_core::commands::summary::summarize;
 use databasecli_core::commands::trend::{TrendInterval, TrendParams, compute_trend};
 use databasecli_core::config::{
-    config_exists_with_base, create_default_config, load_databases, resolve_config_path_with_base,
+    config_exists_with_base, create_default_config, load_databases, resolve_base_dir,
+    resolve_config_path_with_base,
 };
 use databasecli_core::connection::ConnectionManager;
 use databasecli_core::health::check_all_health;
@@ -73,8 +74,11 @@ fn run_loop(
     let config_path = resolve_config_path_with_base(base)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "~/.databasecli/databases.ini".to_string());
+    let mcp_path = resolve_base_dir(base)
+        .map(|p| p.join(".mcp.json").display().to_string())
+        .unwrap_or_else(|_| ".mcp.json".to_string());
     let has_config = config_exists_with_base(base).unwrap_or(false);
-    let mut app = AppState::new(has_config, config_path, directory);
+    let mut app = AppState::new(has_config, config_path, mcp_path, directory);
     let conn_manager = Arc::new(Mutex::new(ConnectionManager::new()));
     let mut bg_rx: Option<mpsc::Receiver<BackgroundResult>> = None;
 
@@ -101,6 +105,42 @@ fn run_loop(
                         Ok(p) => {
                             let path_str = p.display().to_string();
                             app.on_config_created(path_str);
+                        }
+                        Err(e) => app.error_message = Some(e.to_string()),
+                    }
+                }
+                AppAction::RunInit => {
+                    use databasecli_core::init::FileAction;
+                    match databasecli_core::init::run_init(app.directory.as_deref()) {
+                        Ok(result) => {
+                            let mut msgs = Vec::new();
+                            match result.config_action {
+                                FileAction::Created => msgs.push(format!(
+                                    "Config created at {}",
+                                    result.config_path.display()
+                                )),
+                                FileAction::Unchanged => {}
+                                FileAction::Updated => {}
+                            }
+                            match result.mcp_action {
+                                FileAction::Created => msgs.push(format!(
+                                    "MCP config created at {}",
+                                    result.mcp_path.display()
+                                )),
+                                FileAction::Updated => msgs.push(format!(
+                                    "MCP config updated at {}",
+                                    result.mcp_path.display()
+                                )),
+                                FileAction::Unchanged => {}
+                            }
+                            let message = if msgs.is_empty() {
+                                "Already initialized".to_string()
+                            } else {
+                                msgs.join(" | ")
+                            };
+                            let config_created =
+                                result.config_action == FileAction::Created;
+                            app.on_init_completed(message, config_created);
                         }
                         Err(e) => app.error_message = Some(e.to_string()),
                     }

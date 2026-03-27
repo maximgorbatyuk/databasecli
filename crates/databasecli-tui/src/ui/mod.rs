@@ -7,6 +7,7 @@ mod erd;
 mod health;
 mod help;
 mod home;
+mod init;
 mod query;
 mod sample;
 mod schema;
@@ -24,6 +25,7 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
     match app.active_screen {
         Screen::Home => home::draw_home(frame, app, area),
         Screen::CreateConfig => create_config::draw_create_config(frame, app, area),
+        Screen::Init => init::draw_init(frame, app, area),
         Screen::Connect => connect::draw_connect(frame, app, area),
         Screen::StoredDatabases => databases::draw_stored_databases(frame, app, area),
         Screen::DatabaseHealth => health::draw_database_health(frame, app, area),

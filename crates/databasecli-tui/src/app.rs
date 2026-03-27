@@ -15,6 +15,7 @@ use databasecli_core::health::HealthResult;
 pub enum Screen {
     Home,
     CreateConfig,
+    Init,
     Connect,
     StoredDatabases,
     DatabaseHealth,
@@ -32,6 +33,7 @@ pub enum Screen {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuItem {
     CreateConfig,
+    Init,
     Connect,
     StoredDatabases,
     DatabaseHealth,
@@ -50,6 +52,7 @@ impl MenuItem {
     pub fn description(&self) -> &'static str {
         match self {
             MenuItem::CreateConfig => "Create the databases.ini config file",
+            MenuItem::Init => "Create config and .mcp.json for AI agents",
             MenuItem::Connect => "Select databases to connect to",
             MenuItem::StoredDatabases => "View all configured database connections",
             MenuItem::DatabaseHealth => "Check connectivity for all databases",
@@ -68,6 +71,7 @@ impl MenuItem {
     pub fn screen(&self) -> Screen {
         match self {
             MenuItem::CreateConfig => Screen::CreateConfig,
+            MenuItem::Init => Screen::Init,
             MenuItem::Connect => Screen::Connect,
             MenuItem::StoredDatabases => Screen::StoredDatabases,
             MenuItem::DatabaseHealth => Screen::DatabaseHealth,
@@ -102,6 +106,7 @@ impl fmt::Display for MenuItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MenuItem::CreateConfig => write!(f, "Create database.ini"),
+            MenuItem::Init => write!(f, "Initialize Project"),
             MenuItem::Connect => write!(f, "Connect"),
             MenuItem::StoredDatabases => write!(f, "Stored Databases"),
             MenuItem::DatabaseHealth => write!(f, "Database Health"),
@@ -121,6 +126,7 @@ impl fmt::Display for MenuItem {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     CreateConfig,
+    RunInit,
     LoadDatabases,
     CheckHealth,
     ConnectDatabases(Vec<DatabaseConfig>),
@@ -148,6 +154,7 @@ pub struct AppState {
     pub error_message: Option<String>,
     pub status_message: Option<String>,
     pub config_path: String,
+    pub mcp_path: String,
     pub current_dir: String,
     pub directory: Option<String>,
 
@@ -175,11 +182,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config_exists: bool, config_path: String, directory: Option<String>) -> Self {
+    pub fn new(
+        config_exists: bool,
+        config_path: String,
+        mcp_path: String,
+        directory: Option<String>,
+    ) -> Self {
         let mut menu_items = Vec::new();
         if !config_exists {
             menu_items.push(MenuItem::CreateConfig);
         }
+        menu_items.push(MenuItem::Init);
         menu_items.push(MenuItem::Connect);
         menu_items.push(MenuItem::StoredDatabases);
         menu_items.push(MenuItem::DatabaseHealth);
@@ -212,6 +225,7 @@ impl AppState {
             error_message: None,
             status_message: None,
             config_path,
+            mcp_path,
             current_dir,
             directory,
             connected_count: 0,
@@ -266,7 +280,7 @@ impl AppState {
         let screen = item.screen();
 
         match screen {
-            Screen::CreateConfig => {
+            Screen::CreateConfig | Screen::Init => {
                 // Just navigate to confirmation screen
             }
             Screen::Connect => {
@@ -329,6 +343,24 @@ impl AppState {
 
     pub fn confirm_create_config(&mut self) {
         self.pending_action = Some(AppAction::CreateConfig);
+    }
+
+    pub fn confirm_init(&mut self) {
+        self.pending_action = Some(AppAction::RunInit);
+    }
+
+    pub fn on_init_completed(&mut self, message: String, config_created: bool) {
+        if config_created {
+            self.menu_items
+                .retain(|item| *item != MenuItem::CreateConfig);
+        }
+        self.selected = 0;
+        self.active_screen = Screen::Home;
+        self.scroll_offset = 0;
+        self.error_message = None;
+        self.is_loading = false;
+        self.spinner_frame = 0;
+        self.status_message = Some(message);
     }
 
     pub fn go_home(&mut self) {

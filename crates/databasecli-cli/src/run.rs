@@ -11,15 +11,42 @@ use databasecli_core::commands::sample::{format_sample, sample_table};
 use databasecli_core::commands::schema::{dump_schema, format_schema};
 use databasecli_core::commands::summary::{format_summary, summarize};
 use databasecli_core::commands::trend::{TrendInterval, TrendParams, compute_trend, format_trend};
-use databasecli_core::config::{
-    load_databases, resolve_config_path, resolve_config_path_with_base,
-};
+use databasecli_core::config::{load_databases, resolve_config_path_with_base};
 use databasecli_core::connection::ConnectionManager;
 use databasecli_core::health::{check_all_health, format_health_table};
 
 use databasecli_core::help::{build_help_sections, format_help_text};
 
 use crate::args::Cli;
+
+pub fn run_init(cli: &Cli) -> Result<()> {
+    use databasecli_core::init::FileAction;
+
+    let result = databasecli_core::init::run_init(cli.directory.as_deref())?;
+
+    match result.config_action {
+        FileAction::Created => println!("Config created at {}", result.config_path.display()),
+        FileAction::Unchanged => {
+            println!("Config already exists at {}", result.config_path.display())
+        }
+        FileAction::Updated => unreachable!(),
+    }
+
+    match result.mcp_action {
+        FileAction::Created => {
+            println!("MCP config created at {}", result.mcp_path.display())
+        }
+        FileAction::Updated => {
+            println!("MCP config updated at {}", result.mcp_path.display())
+        }
+        FileAction::Unchanged => println!(
+            "MCP config already configured at {}",
+            result.mcp_path.display()
+        ),
+    }
+
+    Ok(())
+}
 
 pub fn run_help() {
     let sections = build_help_sections();
@@ -58,8 +85,8 @@ fn establish_connections(cli: &Cli) -> Result<ConnectionManager> {
     Ok(manager)
 }
 
-pub fn run_list() -> Result<()> {
-    let path = resolve_config_path()?;
+pub fn run_list(cli: &Cli) -> Result<()> {
+    let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
 
     if configs.is_empty() {
@@ -114,8 +141,8 @@ pub fn run_list() -> Result<()> {
     Ok(())
 }
 
-pub fn run_health() -> Result<()> {
-    let path = resolve_config_path()?;
+pub fn run_health(cli: &Cli) -> Result<()> {
+    let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
 
     if configs.is_empty() {

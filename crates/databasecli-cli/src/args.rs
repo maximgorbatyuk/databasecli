@@ -28,6 +28,8 @@ pub struct Cli {
 pub enum Commands {
     /// Launch the interactive TUI
     Tui,
+    /// Initialize config and MCP server configuration
+    Init,
     /// List all stored database connections (from config)
     List,
     /// Check health of all stored database connections (legacy)
