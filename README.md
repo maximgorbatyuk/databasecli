@@ -2,6 +2,12 @@
 
 A CLI and TUI tool for managing and exploring PostgreSQL databases. Includes an MCP server for AI agent access.
 
+## For Whom
+
+- **Backend Developers** — manage connections to multiple databases across environments. Switch between dev, staging, and production without remembering connection strings.
+- **Database Administrators** — monitor database health at a glance. Run quick connectivity checks across your entire fleet and spot issues before they become incidents.
+- **DevOps Engineers** — integrate health checks into your workflow. Script database connectivity verification or use the TUI for interactive troubleshooting.
+
 ## Features
 
 - Full-screen TUI with interactive database management, health monitoring, schema browsing, and query execution
