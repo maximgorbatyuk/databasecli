@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-04-01
+
+### Fixed
+
+- **Outdated config path in docs and UI**: Updated all references from `~/.databasecli/databases.ini` to the CWD-relative `.databasecli/databases.ini` to match the v0.1.3 config resolution change. Affected: website examples, README, privacy policy, MCP docs, TUI empty-state hints, and help screen.
+
 ## [0.1.3] - 2026-04-01
 
 ### Changed
