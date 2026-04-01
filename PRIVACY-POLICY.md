@@ -54,7 +54,7 @@ Information processed by `databasecli` is used to:
 
 The intended privacy model for `databasecli` is local processing on the user's machine.
 
-That means database connections, health checks, and queries are initiated from your device. Configuration files are stored locally in the location you choose (default: `~/.databasecli/databases.ini`).
+That means database connections, health checks, and queries are initiated from your device. Configuration files are stored locally in the location you choose (default: `.databasecli/databases.ini` in your current working directory).
 
 ## MCP server considerations
 

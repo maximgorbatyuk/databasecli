@@ -154,7 +154,7 @@ pub fn build_help_sections() -> Vec<HelpSection> {
             items: vec![
                 HelpItem {
                     name: "Config file".to_string(),
-                    description: "~/.databasecli/databases.ini (release) or target/debug/databases-dev.ini (debug)".to_string(),
+                    description: "<cwd>/.databasecli/databases.ini".to_string(),
                 },
                 HelpItem {
                     name: "With -D flag".to_string(),

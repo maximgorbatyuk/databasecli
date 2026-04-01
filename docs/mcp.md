@@ -25,7 +25,7 @@ cargo build -p databasecli-mcp --release
 ./target/release/databasecli-mcp --init
 
 # 3. Edit the config file with your database connections
-#    Default location: ~/.databasecli/databases.ini
+#    Default location: .databasecli/databases.ini (in current working directory)
 #    With -D flag: <directory>/.databasecli/databases.ini
 
 # 4. Configure your MCP client (see sections below) and start using it
@@ -69,8 +69,7 @@ The config file path is resolved in this priority order:
 
 1. **`DATABASECLI_CONFIG_PATH` env var** — if set, uses this exact path (highest priority)
 2. **`-D <directory>` flag** — uses `<directory>/.databasecli/databases.ini`
-3. **Default (release)** — `~/.databasecli/databases.ini`
-4. **Default (debug build)** — `<exe-directory>/databases-dev.ini`
+3. **Default** — `<cwd>/.databasecli/databases.ini`
 
 If the config file does not exist or cannot be parsed, the server starts with zero configured databases and logs a warning to stderr.
 

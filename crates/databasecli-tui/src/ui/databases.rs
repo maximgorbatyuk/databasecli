@@ -28,7 +28,7 @@ pub fn draw_stored_databases(frame: &mut Frame, app: &AppState, area: ratatui::l
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(Line::from(Span::styled(
-            "  Create ~/.databasecli/databases.ini to add connections.",
+            "  Create .databasecli/databases.ini to add connections.",
             Style::default().fg(Color::DarkGray),
         )));
     } else {

@@ -73,7 +73,7 @@ fn run_loop(
     let base = directory.as_deref();
     let config_path = resolve_config_path_with_base(base)
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "~/.databasecli/databases.ini".to_string());
+        .unwrap_or_else(|_| ".databasecli/databases.ini".to_string());
     let mcp_path = resolve_base_dir(base)
         .map(|p| p.join(".mcp.json").display().to_string())
         .unwrap_or_else(|_| ".mcp.json".to_string());

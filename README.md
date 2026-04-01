@@ -66,7 +66,7 @@ The command will create .ini file in directory `<project_path>/.databasecli/data
 
 ### Option 2: Manual setup
 
-1. Create a config file at `~/.databasecli/databases.ini` (or `<project>/.databasecli/databases.ini` when using `-D`):
+1. Create a config file at `.databasecli/databases.ini` in your project directory:
 
 ```ini
 [production]

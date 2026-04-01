@@ -38,7 +38,7 @@ pub fn draw_database_health(frame: &mut Frame, app: &AppState, area: ratatui::la
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(Line::from(Span::styled(
-            "  Create ~/.databasecli/databases.ini to add connections.",
+            "  Create .databasecli/databases.ini to add connections.",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
