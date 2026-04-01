@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-04-01
+
+### Changed
+
+- **Project-local config by default**: The config file is now resolved from the current working directory (`<cwd>/.databasecli/databases.ini`) instead of the home directory or exe directory. This means each project can have its own set of database connections. The `-D` flag, tilde expansion, and `DATABASECLI_CONFIG_PATH` env var overrides continue to work as before.
+
+### Removed
+
+- **Debug/release path split**: The previous behavior that resolved config from `target/debug/databases-dev.ini` in debug builds and `~/.databasecli/databases.ini` in release builds has been removed. Both modes now use the same cwd-based path.
+
 ## [0.1.2] - 2026-03-27
 
 ### Added

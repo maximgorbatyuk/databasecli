@@ -44,7 +44,7 @@ databasecli health                       # check health of all databases
 
 ## Configuration
 
-INI file at `~/.databasecli/databases.ini` (release) or `target/debug/databases-dev.ini` (dev):
+INI file at `<cwd>/.databasecli/databases.ini` (resolved from the current working directory):
 
 ```ini
 [production]
@@ -57,7 +57,7 @@ dbname = myapp
 
 Env var `DATABASECLI_CONFIG_PATH` overrides the config path (useful for testing).
 
-Detection uses `cfg!(debug_assertions)` — no env var needed for dev/release switching. Path resolution uses the `home` crate for cross-platform home directory lookup.
+Config is project-local: resolved relative to the current working directory. Path resolution no longer depends on `cfg!(debug_assertions)` or the `home` crate for the default path.
 
 ## Design Constraints
 

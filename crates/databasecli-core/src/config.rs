@@ -54,17 +54,8 @@ pub fn resolve_config_path_with_base(base: Option<&str>) -> Result<PathBuf, Data
         return Ok(expanded.join(".databasecli").join("databases.ini"));
     }
 
-    if cfg!(debug_assertions) {
-        let exe = std::env::current_exe().map_err(DatabaseCliError::Io)?;
-        let dir = exe
-            .parent()
-            .ok_or_else(|| std::io::Error::other("no parent for exe"))
-            .map_err(DatabaseCliError::Io)?;
-        Ok(dir.join("databases-dev.ini"))
-    } else {
-        let home = home::home_dir().ok_or(DatabaseCliError::NoHomeDirectory)?;
-        Ok(home.join(".databasecli").join("databases.ini"))
-    }
+    let cwd = std::env::current_dir().map_err(DatabaseCliError::Io)?;
+    Ok(cwd.join(".databasecli").join("databases.ini"))
 }
 
 pub fn config_exists() -> Result<bool, DatabaseCliError> {
@@ -250,6 +241,15 @@ mod tests {
             path,
             PathBuf::from("/tmp/myproject/.databasecli/databases.ini")
         );
+    }
+
+    #[test]
+    fn default_path_uses_cwd() {
+        // SAFETY: test binary runs this single-threaded; no other thread reads this var concurrently.
+        unsafe { std::env::remove_var("DATABASECLI_CONFIG_PATH") };
+        let cwd = std::env::current_dir().unwrap();
+        let path = resolve_config_path_with_base(None).unwrap();
+        assert_eq!(path, cwd.join(".databasecli").join("databases.ini"));
     }
 
     #[test]
