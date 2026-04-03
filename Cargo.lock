@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "databasecli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "databasecli-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "configparser",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "databasecli-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "databasecli-tui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "crossterm",
