@@ -1,6 +1,4 @@
-use crate::commands::query::{
-    QueryResultSet, execute_query, format_query_result, validate_readonly,
-};
+use crate::commands::query::{QueryResultSet, execute_query, format_query_result};
 use crate::connection::ConnectionManager;
 use crate::error::DatabaseCliError;
 
@@ -14,14 +12,13 @@ pub struct CompareResult {
 pub fn compare_query(
     manager: &mut ConnectionManager,
     sql: &str,
+    query_limit: Option<u32>,
 ) -> Result<CompareResult, DatabaseCliError> {
-    validate_readonly(sql)?;
-
     let mut results = Vec::new();
     let mut errors = Vec::new();
 
     for (name, conn) in manager.iter_mut() {
-        match execute_query(conn, sql) {
+        match execute_query(conn, sql, query_limit) {
             Ok(r) => results.push(r),
             Err(e) => errors.push((name.clone(), e.to_string())),
         }

@@ -14,6 +14,7 @@ pub async fn query(
     sql: String,
     database: Option<String>,
 ) -> Result<CallToolResult, McpError> {
+    let query_limit = state.settings.query_limit;
     let result = state
         .with_manager(move |mgr| {
             let conn = match database {
@@ -26,7 +27,7 @@ pub async fn query(
                     .map(|(_, conn)| conn)
                     .ok_or(DatabaseCliError::NoConnections),
             }?;
-            execute_query(conn, &sql)
+            execute_query(conn, &sql, Some(query_limit))
         })
         .await?;
 
@@ -41,8 +42,9 @@ pub async fn query(
 }
 
 pub async fn compare(state: &McpSessionState, sql: String) -> Result<CallToolResult, McpError> {
+    let query_limit = state.settings.query_limit;
     let result = state
-        .with_manager(move |mgr| compare_query(mgr, &sql))
+        .with_manager(move |mgr| compare_query(mgr, &sql, Some(query_limit)))
         .await?;
 
     match result {

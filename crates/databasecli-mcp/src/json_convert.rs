@@ -21,13 +21,26 @@ pub fn config_to_json(config: &DatabaseConfig) -> Value {
 }
 
 pub fn query_result_to_json(result: &QueryResultSet) -> Value {
-    json!({
+    let mut obj = json!({
         "database": result.database_name,
         "columns": result.columns,
         "rows": result.rows,
         "row_count": result.row_count,
         "execution_time_ms": result.execution_time.as_millis(),
-    })
+        "truncated": result.truncated,
+    });
+
+    if result.truncated {
+        obj["truncation_notice"] = json!(format!(
+            "Result set exceeded the configured query_limit of {} rows. \
+             Only the first {} rows are returned. \
+             To retrieve additional rows, use SQL pagination with LIMIT and OFFSET \
+             (e.g., SELECT ... LIMIT {} OFFSET {}).",
+            result.row_count, result.row_count, result.row_count, result.row_count
+        ));
+    }
+
+    obj
 }
 
 pub fn sample_result_to_json(result: &SampleResult) -> Value {
@@ -225,4 +238,73 @@ pub fn erd_result_to_json(result: &ErdResult) -> Value {
         "tables": tables,
         "foreign_keys": foreign_keys,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn make_query_result(truncated: bool, row_count: usize) -> QueryResultSet {
+        QueryResultSet {
+            database_name: "testdb".to_string(),
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: (0..row_count)
+                .map(|i| vec![i.to_string(), format!("row_{i}")])
+                .collect(),
+            row_count,
+            execution_time: Duration::from_millis(42),
+            truncated,
+        }
+    }
+
+    #[test]
+    fn json_includes_truncated_false_without_notice() {
+        let result = make_query_result(false, 3);
+        let json = query_result_to_json(&result);
+
+        assert_eq!(json["truncated"], false);
+        assert!(json.get("truncation_notice").is_none());
+        assert_eq!(json["row_count"], 3);
+        assert_eq!(json["database"], "testdb");
+    }
+
+    #[test]
+    fn json_includes_truncation_notice_when_truncated() {
+        let result = make_query_result(true, 500);
+        let json = query_result_to_json(&result);
+
+        assert_eq!(json["truncated"], true);
+        let notice = json["truncation_notice"].as_str().unwrap();
+        assert!(notice.contains("query_limit of 500 rows"));
+        assert!(notice.contains("LIMIT and OFFSET"));
+        assert!(notice.contains("LIMIT 500 OFFSET 500"));
+    }
+
+    #[test]
+    fn json_truncation_notice_reflects_actual_row_count() {
+        let result = make_query_result(true, 100);
+        let json = query_result_to_json(&result);
+
+        let notice = json["truncation_notice"].as_str().unwrap();
+        assert!(notice.contains("query_limit of 100 rows"));
+        assert!(notice.contains("LIMIT 100 OFFSET 100"));
+    }
+
+    #[test]
+    fn json_empty_result_not_truncated() {
+        let result = QueryResultSet {
+            database_name: "testdb".to_string(),
+            columns: vec![],
+            rows: vec![],
+            row_count: 0,
+            execution_time: Duration::from_millis(1),
+            truncated: false,
+        };
+        let json = query_result_to_json(&result);
+
+        assert_eq!(json["truncated"], false);
+        assert_eq!(json["row_count"], 0);
+        assert!(json.get("truncation_notice").is_none());
+    }
 }

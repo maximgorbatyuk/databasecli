@@ -168,6 +168,10 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                     name: "INI format".to_string(),
                     description: "[section_name] with host, port, user, password, dbname fields".to_string(),
                 },
+                HelpItem {
+                    name: "[settings] section".to_string(),
+                    description: "query_limit = 500 (max rows returned from user queries, 0 = unlimited)".to_string(),
+                },
             ],
         },
         HelpSection {

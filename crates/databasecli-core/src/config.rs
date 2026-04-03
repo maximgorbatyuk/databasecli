@@ -21,6 +21,21 @@ impl DatabaseConfig {
     }
 }
 
+pub const DEFAULT_QUERY_LIMIT: u32 = 500;
+
+#[derive(Debug, Clone)]
+pub struct Settings {
+    pub query_limit: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            query_limit: DEFAULT_QUERY_LIMIT,
+        }
+    }
+}
+
 /// Expand a leading `~` to the user's home directory.
 pub fn expand_tilde(dir: &str) -> Result<PathBuf, DatabaseCliError> {
     if let Some(rest) = dir.strip_prefix('~') {
@@ -74,6 +89,12 @@ pub fn create_default_config(path: &PathBuf) -> Result<(), DatabaseCliError> {
 
     let template = "\
 ; databasecli configuration
+;
+; Global settings (all optional):
+;
+; [settings]
+; query_limit = 500
+;
 ; Add database connections as INI sections:
 ;
 ; [my_database]
@@ -86,6 +107,24 @@ pub fn create_default_config(path: &PathBuf) -> Result<(), DatabaseCliError> {
 
     std::fs::write(path, template).map_err(DatabaseCliError::Io)?;
     Ok(())
+}
+
+pub fn load_settings(path: &std::path::Path) -> Settings {
+    if !path.exists() {
+        return Settings::default();
+    }
+
+    let mut ini = configparser::ini::Ini::new();
+    if ini.load(path).is_err() {
+        return Settings::default();
+    }
+
+    let query_limit = ini
+        .get("settings", "query_limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_QUERY_LIMIT);
+
+    Settings { query_limit }
 }
 
 pub fn load_databases(path: &PathBuf) -> Result<Vec<DatabaseConfig>, DatabaseCliError> {
@@ -101,6 +140,10 @@ pub fn load_databases(path: &PathBuf) -> Result<Vec<DatabaseConfig>, DatabaseCli
     let mut configs = Vec::with_capacity(sections.len());
 
     for section in &sections {
+        if section == "settings" {
+            continue;
+        }
+
         let get_field = |field: &str| -> Result<String, DatabaseCliError> {
             ini.get(section, field)
                 .ok_or_else(|| DatabaseCliError::MissingField {
@@ -250,6 +293,75 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let path = resolve_config_path_with_base(None).unwrap();
         assert_eq!(path, cwd.join(".databasecli").join("databases.ini"));
+    }
+
+    #[test]
+    fn load_settings_defaults_when_no_file() {
+        let path = PathBuf::from("/tmp/nonexistent-databasecli-settings.ini");
+        let settings = load_settings(&path);
+        assert_eq!(settings.query_limit, 500);
+    }
+
+    #[test]
+    fn load_settings_defaults_when_no_settings_section() {
+        let (_f, path) = write_ini(
+            "[production]\n\
+             host = localhost\n\
+             port = 5432\n\
+             user = admin\n\
+             password = secret\n\
+             dbname = myapp\n",
+        );
+        let settings = load_settings(&path);
+        assert_eq!(settings.query_limit, 500);
+    }
+
+    #[test]
+    fn load_settings_reads_query_limit() {
+        let (_f, path) = write_ini(
+            "[settings]\n\
+             query_limit = 100\n",
+        );
+        let settings = load_settings(&path);
+        assert_eq!(settings.query_limit, 100);
+    }
+
+    #[test]
+    fn load_settings_defaults_on_invalid_value() {
+        let (_f, path) = write_ini(
+            "[settings]\n\
+             query_limit = abc\n",
+        );
+        let settings = load_settings(&path);
+        assert_eq!(settings.query_limit, 500);
+    }
+
+    #[test]
+    fn load_settings_zero_means_no_limit() {
+        let (_f, path) = write_ini(
+            "[settings]\n\
+             query_limit = 0\n",
+        );
+        let settings = load_settings(&path);
+        assert_eq!(settings.query_limit, 0);
+    }
+
+    #[test]
+    fn load_databases_skips_settings_section() {
+        let (_f, path) = write_ini(
+            "[settings]\n\
+             query_limit = 100\n\
+             \n\
+             [production]\n\
+             host = localhost\n\
+             port = 5432\n\
+             user = admin\n\
+             password = secret\n\
+             dbname = myapp\n",
+        );
+        let configs = load_databases(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "production");
     }
 
     #[test]

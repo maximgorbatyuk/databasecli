@@ -73,6 +73,16 @@ pub fn draw_compare(frame: &mut Frame, app: &AppState, area: ratatui::layout::Re
                     )));
                 }
             }
+
+            if qr.truncated {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  (results truncated to {} rows by query_limit)",
+                        qr.row_count
+                    ),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
             lines.push(Line::from(""));
         }
 

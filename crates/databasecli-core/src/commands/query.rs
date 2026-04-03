@@ -10,6 +10,7 @@ pub struct QueryResultSet {
     pub rows: Vec<Vec<String>>,
     pub row_count: usize,
     pub execution_time: Duration,
+    pub truncated: bool,
 }
 
 pub fn validate_readonly(sql: &str) -> Result<(), DatabaseCliError> {
@@ -166,14 +167,37 @@ pub fn cell_to_string(row: &postgres::Row, idx: usize) -> String {
     }
 }
 
+fn should_wrap_with_limit(sql: &str) -> bool {
+    let stripped = strip_sql_comments(sql);
+    let first_keyword = stripped
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_uppercase();
+    matches!(first_keyword.as_str(), "SELECT" | "WITH" | "TABLE")
+}
+
 pub fn execute_query(
     conn: &mut LiveConnection,
     sql: &str,
+    query_limit: Option<u32>,
 ) -> Result<QueryResultSet, DatabaseCliError> {
     validate_readonly(sql)?;
 
+    let effective_limit = query_limit.filter(|&l| l > 0);
+
+    let effective_sql = match effective_limit {
+        Some(limit) if should_wrap_with_limit(sql) => {
+            format!(
+                "SELECT * FROM ({sql}) AS _limited_query LIMIT {}",
+                limit as i64 + 1
+            )
+        }
+        _ => sql.to_string(),
+    };
+
     let start = Instant::now();
-    let rows = conn.client.query(sql, &[])?;
+    let rows = conn.client.query(&effective_sql, &[])?;
     let execution_time = start.elapsed();
 
     let columns: Vec<String> = if let Some(first) = rows.first() {
@@ -186,8 +210,7 @@ pub fn execute_query(
         Vec::new()
     };
 
-    let row_count = rows.len();
-    let data: Vec<Vec<String>> = rows
+    let mut data: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
             (0..row.columns().len())
@@ -196,12 +219,24 @@ pub fn execute_query(
         })
         .collect();
 
+    let mut truncated = false;
+    if let Some(limit) = effective_limit {
+        let limit = limit as usize;
+        if data.len() > limit {
+            data.truncate(limit);
+            truncated = true;
+        }
+    }
+
+    let row_count = data.len();
+
     Ok(QueryResultSet {
         database_name: conn.config.name.clone(),
         columns,
         rows: data,
         row_count,
         execution_time,
+        truncated,
     })
 }
 
@@ -260,6 +295,13 @@ pub fn format_query_result(result: &QueryResultSet) -> String {
         "\n{} row(s) ({:.0?})\n",
         result.row_count, result.execution_time
     ));
+
+    if result.truncated {
+        out.push_str(&format!(
+            "(results truncated to {} rows by query_limit)\n",
+            result.row_count
+        ));
+    }
 
     out
 }
@@ -372,5 +414,86 @@ mod tests {
     #[test]
     fn rejects_nested_comment_hiding_mutation() {
         assert!(validate_readonly("/* /* */ DELETE */ SELECT 1").is_err());
+    }
+
+    #[test]
+    fn wraps_select_queries() {
+        assert!(should_wrap_with_limit("SELECT * FROM users"));
+        assert!(should_wrap_with_limit("select 1"));
+    }
+
+    #[test]
+    fn wraps_with_queries() {
+        assert!(should_wrap_with_limit(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
+    }
+
+    #[test]
+    fn wraps_table_queries() {
+        assert!(should_wrap_with_limit("TABLE users"));
+    }
+
+    #[test]
+    fn does_not_wrap_explain() {
+        assert!(!should_wrap_with_limit("EXPLAIN SELECT * FROM users"));
+    }
+
+    #[test]
+    fn does_not_wrap_show() {
+        assert!(!should_wrap_with_limit("SHOW server_version"));
+    }
+
+    #[test]
+    fn wraps_select_with_leading_comment() {
+        assert!(should_wrap_with_limit("/* comment */ SELECT 1"));
+    }
+
+    #[test]
+    fn does_not_wrap_empty_or_whitespace() {
+        assert!(!should_wrap_with_limit(""));
+        assert!(!should_wrap_with_limit("   "));
+    }
+
+    fn make_result(truncated: bool, row_count: usize) -> QueryResultSet {
+        QueryResultSet {
+            database_name: "testdb".to_string(),
+            columns: vec!["id".to_string()],
+            rows: (0..row_count).map(|i| vec![i.to_string()]).collect(),
+            row_count,
+            execution_time: Duration::from_millis(10),
+            truncated,
+        }
+    }
+
+    #[test]
+    fn format_query_result_shows_truncation_notice() {
+        let result = make_result(true, 500);
+        let output = format_query_result(&result);
+        assert!(output.contains("500 row(s)"));
+        assert!(output.contains("results truncated to 500 rows by query_limit"));
+    }
+
+    #[test]
+    fn format_query_result_no_notice_when_not_truncated() {
+        let result = make_result(false, 10);
+        let output = format_query_result(&result);
+        assert!(output.contains("10 row(s)"));
+        assert!(!output.contains("truncated"));
+    }
+
+    #[test]
+    fn format_query_result_empty_result_no_notice() {
+        let result = QueryResultSet {
+            database_name: "testdb".to_string(),
+            columns: vec![],
+            rows: vec![],
+            row_count: 0,
+            execution_time: Duration::from_millis(1),
+            truncated: false,
+        };
+        let output = format_query_result(&result);
+        assert!(output.contains("0 rows"));
+        assert!(!output.contains("truncated"));
     }
 }

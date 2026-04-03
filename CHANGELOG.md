@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-04-03
+
+### Added
+
+- **Configurable query row limit**: New `[settings]` section in `databases.ini` with a `query_limit` option (default: 500). Caps the number of rows returned by user queries (`query`, `compare`) across CLI, TUI, and MCP. Set `query_limit = 0` to disable the limit.
+- **Truncation indicator**: When results are capped, a clear notice is shown — yellow text in the TUI, a footer line in CLI output, and a `truncated` flag plus `truncation_notice` with pagination guidance in MCP JSON responses.
+- **MCP pagination guidance**: Truncated MCP responses now include a `truncation_notice` field explaining the limit and suggesting `LIMIT`/`OFFSET` SQL pagination for AI agents.
+
+### Changed
+
+- **`establish_connections` returns settings**: CLI connection setup now loads settings in a single INI parse pass, eliminating redundant file reads for `query` and `compare` subcommands.
+- **`compare_query` no longer double-validates SQL**: Removed the redundant `validate_readonly` call since `execute_query` already performs validation.
+
 ## [0.1.4] - 2026-04-01
 
 ### Fixed

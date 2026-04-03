@@ -71,6 +71,17 @@ pub fn draw_query(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect
                 )));
             }
         }
+
+        if result.truncated {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  (results truncated to {} rows by query_limit)",
+                    result.row_count
+                ),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     }
 
     lines.push(Line::from(""));

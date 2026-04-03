@@ -11,7 +11,9 @@ use databasecli_core::commands::sample::{format_sample, sample_table};
 use databasecli_core::commands::schema::{dump_schema, format_schema};
 use databasecli_core::commands::summary::{format_summary, summarize};
 use databasecli_core::commands::trend::{TrendInterval, TrendParams, compute_trend, format_trend};
-use databasecli_core::config::{load_databases, resolve_config_path_with_base};
+use databasecli_core::config::{
+    Settings, load_databases, load_settings, resolve_config_path_with_base,
+};
 use databasecli_core::connection::ConnectionManager;
 use databasecli_core::health::{check_all_health, format_health_table};
 
@@ -53,9 +55,10 @@ pub fn run_help() {
     print!("{}", format_help_text(&sections));
 }
 
-fn establish_connections(cli: &Cli) -> Result<ConnectionManager> {
+fn establish_connections(cli: &Cli) -> Result<(ConnectionManager, Settings)> {
     let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
+    let settings = load_settings(&path);
 
     if configs.is_empty() {
         anyhow::bail!(
@@ -82,7 +85,7 @@ fn establish_connections(cli: &Cli) -> Result<ConnectionManager> {
         }
     }
 
-    Ok(manager)
+    Ok((manager, settings))
 }
 
 pub fn run_list(cli: &Cli) -> Result<()> {
@@ -158,21 +161,21 @@ pub fn run_health(cli: &Cli) -> Result<()> {
 }
 
 pub fn run_list_databases(cli: &Cli) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     let databases = list_connected(&mut manager);
     print!("{}", format_connected_table(&databases));
     Ok(())
 }
 
 pub fn run_health_check(cli: &Cli) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     let results = check_all_enhanced_health(&mut manager);
     print!("{}", format_enhanced_health_table(&results));
     Ok(())
 }
 
 pub fn run_schema(cli: &Cli, schema: &str) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     for (_, conn) in manager.iter_mut() {
         let result = dump_schema(conn, Some(schema))?;
         print!("{}", format_schema(&result));
@@ -181,10 +184,10 @@ pub fn run_schema(cli: &Cli, schema: &str) -> Result<()> {
 }
 
 pub fn run_query(cli: &Cli, sql: &str) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, settings) = establish_connections(cli)?;
     let multi = manager.len() > 1;
     for (name, conn) in manager.iter_mut() {
-        let result = execute_query(conn, sql)?;
+        let result = execute_query(conn, sql, Some(settings.query_limit))?;
         if multi {
             println!("=== {} ===", name);
         }
@@ -200,7 +203,7 @@ pub fn run_sample(
     limit: i64,
     order_by: Option<&str>,
 ) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     for (_, conn) in manager.iter_mut() {
         let result = sample_table(conn, table, Some(schema), Some(limit), order_by)?;
         print!("{}", format_sample(&result));
@@ -209,8 +212,8 @@ pub fn run_sample(
 }
 
 pub fn run_compare(cli: &Cli, sql: &str) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
-    let result = compare_query(&mut manager, sql)?;
+    let (mut manager, settings) = establish_connections(cli)?;
+    let result = compare_query(&mut manager, sql, Some(settings.query_limit))?;
     print!("{}", format_compare_result(&result));
     Ok(())
 }
@@ -234,7 +237,7 @@ pub fn run_trend(
         limit,
     };
 
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     for (_, conn) in manager.iter_mut() {
         let result = compute_trend(conn, &params)?;
         print!("{}", format_trend(&result));
@@ -243,7 +246,7 @@ pub fn run_trend(
 }
 
 pub fn run_analyze(cli: &Cli, table: &str, schema: &str) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     for (_, conn) in manager.iter_mut() {
         let result = analyze_table(conn, table, Some(schema))?;
         print!("{}", format_table_profile(&result));
@@ -252,7 +255,7 @@ pub fn run_analyze(cli: &Cli, table: &str, schema: &str) -> Result<()> {
 }
 
 pub fn run_summary(cli: &Cli) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     for (_, conn) in manager.iter_mut() {
         let result = summarize(conn)?;
         print!("{}", format_summary(&result));
@@ -261,7 +264,7 @@ pub fn run_summary(cli: &Cli) -> Result<()> {
 }
 
 pub fn run_erd(cli: &Cli, schema: &str, format: &str, output: Option<&str>) -> Result<()> {
-    let mut manager = establish_connections(cli)?;
+    let (mut manager, _) = establish_connections(cli)?;
     let mut all_output = String::new();
     for (_, conn) in manager.iter_mut() {
         let result = build_erd(conn, Some(schema))?;

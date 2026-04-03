@@ -2,12 +2,15 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::ErrorData as McpError;
 
-use databasecli_core::config::{DatabaseConfig, load_databases, resolve_config_path_with_base};
+use databasecli_core::config::{
+    DatabaseConfig, Settings, load_databases, load_settings, resolve_config_path_with_base,
+};
 use databasecli_core::connection::ConnectionManager;
 
 pub struct McpSessionState {
     pub manager: Arc<Mutex<ConnectionManager>>,
     pub configs: Vec<DatabaseConfig>,
+    pub settings: Settings,
 }
 
 impl McpSessionState {
@@ -23,9 +26,11 @@ impl McpSessionState {
                 Vec::new()
             }
         };
+        let settings = load_settings(&path);
         Ok(Self {
             manager: Arc::new(Mutex::new(ConnectionManager::new())),
             configs,
+            settings,
         })
     }
 

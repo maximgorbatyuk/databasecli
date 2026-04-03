@@ -26,8 +26,8 @@ use databasecli_core::commands::schema::dump_schema;
 use databasecli_core::commands::summary::summarize;
 use databasecli_core::commands::trend::{TrendInterval, TrendParams, compute_trend};
 use databasecli_core::config::{
-    config_exists_with_base, create_default_config, load_databases, resolve_base_dir,
-    resolve_config_path_with_base,
+    config_exists_with_base, create_default_config, load_databases, load_settings,
+    resolve_base_dir, resolve_config_path_with_base,
 };
 use databasecli_core::connection::ConnectionManager;
 use databasecli_core::health::check_all_health;
@@ -78,6 +78,10 @@ fn run_loop(
         .map(|p| p.join(".mcp.json").display().to_string())
         .unwrap_or_else(|_| ".mcp.json".to_string());
     let has_config = config_exists_with_base(base).unwrap_or(false);
+    let settings = resolve_config_path_with_base(base)
+        .map(|p| load_settings(&p))
+        .unwrap_or_default();
+    let query_limit = settings.query_limit;
     let mut app = AppState::new(has_config, config_path, mcp_path, directory);
     let conn_manager = Arc::new(Mutex::new(ConnectionManager::new()));
     let mut bg_rx: Option<mpsc::Receiver<BackgroundResult>> = None;
@@ -224,15 +228,15 @@ fn run_loop(
                 }
                 AppAction::RunQuery(sql) => {
                     let mgr = Arc::clone(&conn_manager);
+                    let limit = query_limit;
                     let (tx, rx) = mpsc::channel();
                     bg_rx = Some(rx);
                     thread::spawn(move || {
                         let mut manager = mgr.lock().unwrap();
                         // Run on first connected database
-                        let result = manager
-                            .iter_mut()
-                            .next()
-                            .map(|(_, conn)| execute_query(conn, &sql).map_err(|e| e.to_string()));
+                        let result = manager.iter_mut().next().map(|(_, conn)| {
+                            execute_query(conn, &sql, Some(limit)).map_err(|e| e.to_string())
+                        });
                         match result {
                             Some(r) => {
                                 let _ = tx.send(BackgroundResult::Query(r));
@@ -331,11 +335,13 @@ fn run_loop(
                 }
                 AppAction::RunCompare(sql) => {
                     let mgr = Arc::clone(&conn_manager);
+                    let limit = query_limit;
                     let (tx, rx) = mpsc::channel();
                     bg_rx = Some(rx);
                     thread::spawn(move || {
                         let mut manager = mgr.lock().unwrap();
-                        let result = compare_query(&mut manager, &sql).map_err(|e| e.to_string());
+                        let result = compare_query(&mut manager, &sql, Some(limit))
+                            .map_err(|e| e.to_string());
                         let _ = tx.send(BackgroundResult::Compare(result));
                     });
                 }
