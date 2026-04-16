@@ -3,21 +3,28 @@
 databasecli release script.
 
 Release flow:
-  1. Parse and validate version argument (X.Y.Z, all non-negative integers)
-  2. Check prerequisites: gh CLI installed and authenticated, just installed
-  3. Check clean git working tree (no uncommitted changes)
-  4. Run just verify (fmt, clippy, test, build)
+  1. Determine version: use argument if given, otherwise read Cargo.toml
+     and increment the patch number (e.g. 0.1.6 -> 0.1.7)
+  2. Validate version format (X.Y.Z, all non-negative integers)
+  3. Validate CHANGELOG.md has release notes for the new version and
+     that it is the latest entry
+  4. Check prerequisites: gh CLI installed and authenticated, just installed
   5. Switch to 'dev' branch, pull latest
-  6. Update version in workspace Cargo.toml
-  7. Run cargo check to verify Cargo.lock updates
-  8. Commit version bump, push dev
-  9. Switch to 'main' branch, pull latest
-  10. Merge dev into main, push main
-  11. Create and push tag vX.Y.Z
-  12. Print success summary
+  6. If uncommitted changes exist, commit them on dev with
+     'Committing changes for version X.Y.Z'
+  7. Run just verify (fmt, clippy, test, build)
+  8. Update version in workspace Cargo.toml
+  9. Run cargo check to verify Cargo.lock updates
+  10. Commit version bump, push dev
+  11. Switch to 'main' branch, pull latest
+  12. Merge dev into main, push main
+  13. Create and push tag vX.Y.Z
+  14. Switch back to 'dev' branch, pull latest
+  15. Print success summary
 
 Usage:
-  ./scripts/release.py 0.2.0
+  ./scripts/release.py 0.2.0    # explicit version
+  ./scripts/release.py           # auto-increment patch from Cargo.toml
 """
 
 import re
@@ -27,6 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CARGO_TOML = REPO_ROOT / "Cargo.toml"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 
 
 def run(cmd: list[str], *, cwd: Path = REPO_ROOT, check: bool = True) -> subprocess.CompletedProcess:
@@ -45,19 +53,63 @@ def run(cmd: list[str], *, cwd: Path = REPO_ROOT, check: bool = True) -> subproc
 
 def validate_version(version: str) -> None:
     """Validate that version matches X.Y.Z where each part is a non-negative integer."""
-    pattern = r"^\d+\.\d+\.\d+$"
-    if not re.match(pattern, version):
+    if not re.match(r"^\d+\.\d+\.\d+$", version):
         print(f"ERROR: invalid version '{version}'. Expected format: X.Y.Z (e.g. 0.2.0)")
         sys.exit(1)
 
-    parts = version.split(".")
-    for part in parts:
-        n = int(part)
-        if n < 0:
-            print(f"ERROR: version parts must be non-negative, got '{part}'")
-            sys.exit(1)
-
     print(f"  Version: {version}")
+
+
+def read_current_version() -> str:
+    """Read the workspace version from the [workspace.package] section of Cargo.toml."""
+    content = CARGO_TOML.read_text()
+    # Match version inside [workspace.package] to avoid hitting dependency versions
+    match = re.search(
+        r'^\[workspace\.package\]\s*\n(?:.*\n)*?version\s*=\s*"([^"]+)"',
+        content,
+        re.MULTILINE,
+    )
+    if not match:
+        print("ERROR: could not find version in [workspace.package] in Cargo.toml")
+        sys.exit(1)
+    return match.group(1)
+
+
+def increment_patch(version: str) -> str:
+    """Increment the patch component: 0.1.6 -> 0.1.7."""
+    parts = version.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
+def validate_changelog(version: str) -> None:
+    """Check that CHANGELOG.md contains release notes for version and it is the latest entry."""
+    if not CHANGELOG.exists():
+        print(f"ERROR: CHANGELOG.md not found at {CHANGELOG}")
+        sys.exit(1)
+
+    content = CHANGELOG.read_text()
+
+    # Find all version headings like ## [0.1.7]
+    headings = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", content, re.MULTILINE)
+
+    if not headings:
+        print("ERROR: no version entries found in CHANGELOG.md")
+        sys.exit(1)
+
+    if version not in headings:
+        print(f"ERROR: CHANGELOG.md has no release notes for version {version}")
+        print(f"  Found versions: {', '.join(headings)}")
+        print(f"  Add a '## [{version}]' section before releasing.")
+        sys.exit(1)
+
+    if headings[0] != version:
+        print(f"ERROR: version {version} is not the latest entry in CHANGELOG.md")
+        print(f"  Latest entry is: {headings[0]}")
+        print(f"  The new version must be the first ## [X.Y.Z] heading.")
+        sys.exit(1)
+
+    print(f"  CHANGELOG.md: release notes for {version} found (latest entry)")
 
 
 def check_gh_cli() -> None:
@@ -89,14 +141,16 @@ def check_just() -> None:
     print("  just: installed")
 
 
-def check_clean_worktree() -> None:
-    """Abort if there are uncommitted changes."""
+def ensure_clean_worktree(version: str) -> None:
+    """If there are uncommitted changes, commit them for the release."""
     result = run(["git", "status", "--porcelain"], check=False)
     if result.stdout.strip():
-        print("ERROR: working tree is not clean. Commit or stash changes first.")
-        print(result.stdout.strip())
-        sys.exit(1)
-    print("  Working tree: clean")
+        print("  Uncommitted changes detected — committing for release")
+        run(["git", "add", "-A"])
+        run(["git", "commit", "-m", f"Committing changes for version {version}"])
+        print(f"  Committed all changes for version {version}")
+    else:
+        print("  Working tree: clean")
 
 
 def run_verify() -> None:
@@ -161,56 +215,75 @@ def create_and_push_tag(version: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print("Usage: ./scripts/release.py <version>")
+    if len(sys.argv) > 2:
+        print("Usage: ./scripts/release.py [version]")
         print("Example: ./scripts/release.py 0.2.0")
+        print("         ./scripts/release.py          # auto-increment patch")
         sys.exit(1)
-
-    version = sys.argv[1]
 
     print("=== databasecli Release ===\n")
 
-    # Step 1: Validate version
-    print("Step 1: Validate version")
+    # Step 1: Determine version
+    print("Step 1: Determine version")
+    if len(sys.argv) == 2:
+        version = sys.argv[1]
+        print(f"  Version provided: {version}")
+    else:
+        current = read_current_version()
+        version = increment_patch(current)
+        print(f"  Current version: {current}")
+        print(f"  Next version:    {version}")
+
+    # Step 2: Validate version
+    print("\nStep 2: Validate version")
     validate_version(version)
 
-    # Step 2: Check prerequisites
-    print("\nStep 2: Check prerequisites")
+    # Step 3: Validate changelog
+    print("\nStep 3: Validate changelog")
+    validate_changelog(version)
+
+    # Step 4: Check prerequisites
+    print("\nStep 4: Check prerequisites")
     check_gh_cli()
     check_just()
 
-    # Step 3: Check clean working tree
-    print("\nStep 3: Check clean working tree")
-    check_clean_worktree()
-
-    # Step 4: Run verification
-    print("\nStep 4: Run verification")
-    run_verify()
-
-    # Step 5: Switch to dev branch
+    # Step 5: Switch to dev branch (before committing so changes land on dev)
     print("\nStep 5: Switch to dev branch")
     switch_branch("dev")
 
-    # Step 6: Update version
-    print("\nStep 6: Update version")
+    # Step 6: Commit uncommitted changes if any
+    print("\nStep 6: Check working tree")
+    ensure_clean_worktree(version)
+
+    # Step 7: Run verification
+    print("\nStep 7: Run verification")
+    run_verify()
+
+    # Step 8: Update version
+    print("\nStep 8: Update version")
     update_version(version)
 
-    # Step 7: Commit and push dev
-    print("\nStep 7: Commit and push version bump")
+    # Step 9: Commit and push dev
+    print("\nStep 9: Commit and push version bump")
     commit_and_push_version(version)
 
-    # Step 8: Merge dev into main
-    print("\nStep 8: Merge dev into main")
+    # Step 10: Merge dev into main
+    print("\nStep 10: Merge dev into main")
     merge_to_main()
 
-    # Step 9: Create and push tag
-    print("\nStep 9: Create and push tag")
+    # Step 11: Create and push tag
+    print("\nStep 11: Create and push tag")
     create_and_push_tag(version)
 
-    # Step 10: Done
+    # Step 12: Switch back to dev and pull (includes merge commit from main)
+    print("\nStep 12: Switch back to dev branch")
+    switch_branch("dev")
+
+    # Done
     tag = f"v{version}"
     print(f"\n=== Release {tag} complete ===")
     print(f"  Tag: {tag}")
+    print(f"  Branch: dev (switched back)")
     print(f"  GitHub Actions will build release artifacts via cargo-dist.")
     print(f"  Monitor: gh run list --workflow release.yml")
 
