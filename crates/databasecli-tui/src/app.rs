@@ -10,6 +10,7 @@ use databasecli_core::commands::summary::DatabaseSummary;
 use databasecli_core::commands::trend::TrendResult;
 use databasecli_core::config::DatabaseConfig;
 use databasecli_core::health::HealthResult;
+use databasecli_core::init::CodingAgent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
@@ -52,7 +53,7 @@ impl MenuItem {
     pub fn description(&self) -> &'static str {
         match self {
             MenuItem::CreateConfig => "Create the databases.ini config file",
-            MenuItem::Init => "Create config and .mcp.json for AI agents",
+            MenuItem::Init => "Create config and configure MCP for coding agents",
             MenuItem::Connect => "Select databases to connect to",
             MenuItem::StoredDatabases => "View all configured database connections",
             MenuItem::DatabaseHealth => "Check connectivity for all databases",
@@ -126,7 +127,7 @@ impl fmt::Display for MenuItem {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     CreateConfig,
-    RunInit,
+    RunInit(Vec<CodingAgent>),
     LoadDatabases,
     CheckHealth,
     ConnectDatabases(Vec<DatabaseConfig>),
@@ -154,7 +155,6 @@ pub struct AppState {
     pub error_message: Option<String>,
     pub status_message: Option<String>,
     pub config_path: String,
-    pub mcp_path: String,
     pub current_dir: String,
     pub directory: Option<String>,
 
@@ -163,6 +163,11 @@ pub struct AppState {
     pub connected_names: Vec<String>,
     pub connect_cursor: usize,
     pub connect_selection: Vec<bool>,
+
+    // Init agent selection
+    pub init_agents: Vec<CodingAgent>,
+    pub init_agent_selection: Vec<bool>,
+    pub init_agent_cursor: usize,
 
     // Input state
     pub input_buffer: String,
@@ -182,12 +187,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        config_exists: bool,
-        config_path: String,
-        mcp_path: String,
-        directory: Option<String>,
-    ) -> Self {
+    pub fn new(config_exists: bool, config_path: String, directory: Option<String>) -> Self {
         let mut menu_items = Vec::new();
         if !config_exists {
             menu_items.push(MenuItem::CreateConfig);
@@ -225,13 +225,15 @@ impl AppState {
             error_message: None,
             status_message: None,
             config_path,
-            mcp_path,
             current_dir,
             directory,
             connected_count: 0,
             connected_names: Vec::new(),
             connect_cursor: 0,
             connect_selection: Vec::new(),
+            init_agents: CodingAgent::ALL.to_vec(),
+            init_agent_selection: vec![false; CodingAgent::ALL.len()],
+            init_agent_cursor: 0,
             input_buffer: String::new(),
             input_mode: false,
             schema_results: None,
@@ -280,8 +282,12 @@ impl AppState {
         let screen = item.screen();
 
         match screen {
-            Screen::CreateConfig | Screen::Init => {
+            Screen::CreateConfig => {
                 // Just navigate to confirmation screen
+            }
+            Screen::Init => {
+                self.init_agent_selection = vec![false; self.init_agents.len()];
+                self.init_agent_cursor = 0;
             }
             Screen::Connect => {
                 self.pending_action = Some(AppAction::LoadDatabases);
@@ -346,7 +352,32 @@ impl AppState {
     }
 
     pub fn confirm_init(&mut self) {
-        self.pending_action = Some(AppAction::RunInit);
+        let chosen: Vec<CodingAgent> = self
+            .init_agents
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.init_agent_selection.get(*i).copied().unwrap_or(false))
+            .map(|(_, a)| *a)
+            .collect();
+        self.pending_action = Some(AppAction::RunInit(chosen));
+    }
+
+    pub fn init_agent_cursor_up(&mut self) {
+        if self.init_agent_cursor > 0 {
+            self.init_agent_cursor -= 1;
+        }
+    }
+
+    pub fn init_agent_cursor_down(&mut self) {
+        if self.init_agent_cursor + 1 < self.init_agents.len() {
+            self.init_agent_cursor += 1;
+        }
+    }
+
+    pub fn toggle_init_agent(&mut self) {
+        if let Some(val) = self.init_agent_selection.get_mut(self.init_agent_cursor) {
+            *val = !*val;
+        }
     }
 
     pub fn on_init_completed(&mut self, message: String, config_created: bool) {

@@ -22,9 +22,48 @@ use databasecli_core::help::{build_help_sections, format_help_text};
 use crate::args::Cli;
 
 pub fn run_init(cli: &Cli) -> Result<()> {
-    use databasecli_core::init::FileAction;
+    use std::io::{Write, stdin, stdout};
 
-    let result = databasecli_core::init::run_init(cli.directory.as_deref())?;
+    use databasecli_core::init::{CodingAgent, FileAction};
+
+    let agents = CodingAgent::ALL;
+    let mut selected = vec![false; agents.len()];
+
+    println!("Select coding agents to configure MCP for:");
+    println!("(enter numbers separated by spaces, e.g. \"1 3\")\n");
+    for (i, agent) in agents.iter().enumerate() {
+        println!("  {}. {} ({})", i + 1, agent, agent.config_filename());
+    }
+    print!("\n> ");
+    stdout().flush()?;
+
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+
+    for token in input.split_whitespace() {
+        match token.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= agents.len() => {
+                selected[n - 1] = true;
+            }
+            _ => {
+                eprintln!("Ignoring unrecognized input: {token}");
+            }
+        }
+    }
+
+    let chosen: Vec<CodingAgent> = agents
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| selected[*i])
+        .map(|(_, a)| *a)
+        .collect();
+
+    if chosen.is_empty() {
+        println!("No agents selected. Skipping MCP configuration.");
+        println!("Creating config file only.");
+    }
+
+    let result = databasecli_core::init::run_init(cli.directory.as_deref(), &chosen)?;
 
     match result.config_action {
         FileAction::Created => println!("Config created at {}", result.config_path.display()),
@@ -34,17 +73,24 @@ pub fn run_init(cli: &Cli) -> Result<()> {
         FileAction::Updated => unreachable!(),
     }
 
-    match result.mcp_action {
-        FileAction::Created => {
-            println!("MCP config created at {}", result.mcp_path.display())
+    for agent_result in &result.agent_results {
+        match agent_result.action {
+            FileAction::Created => println!(
+                "{} config created at {}",
+                agent_result.agent,
+                agent_result.path.display()
+            ),
+            FileAction::Updated => println!(
+                "{} config updated at {}",
+                agent_result.agent,
+                agent_result.path.display()
+            ),
+            FileAction::Unchanged => println!(
+                "{} already configured at {}",
+                agent_result.agent,
+                agent_result.path.display()
+            ),
         }
-        FileAction::Updated => {
-            println!("MCP config updated at {}", result.mcp_path.display())
-        }
-        FileAction::Unchanged => println!(
-            "MCP config already configured at {}",
-            result.mcp_path.display()
-        ),
     }
 
     Ok(())

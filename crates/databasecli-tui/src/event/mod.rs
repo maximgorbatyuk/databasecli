@@ -83,6 +83,9 @@ fn handle_init(app: &mut AppState, code: KeyCode) {
     match code {
         KeyCode::Char('q') => app.quit(),
         KeyCode::Esc => app.go_home(),
+        KeyCode::Up | KeyCode::Char('k') => app.init_agent_cursor_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.init_agent_cursor_down(),
+        KeyCode::Char(' ') => app.toggle_init_agent(),
         KeyCode::Enter => app.confirm_init(),
         _ => {}
     }
