@@ -23,14 +23,16 @@ pub enum CodingAgent {
     ClaudeCode,
     Opencode,
     Codex,
+    Cursor,
 }
 
 impl CodingAgent {
     /// All available coding agents.
-    pub const ALL: [CodingAgent; 3] = [
+    pub const ALL: [CodingAgent; 4] = [
         CodingAgent::ClaudeCode,
         CodingAgent::Opencode,
         CodingAgent::Codex,
+        CodingAgent::Cursor,
     ];
 
     /// Config file path relative to the project directory.
@@ -39,6 +41,7 @@ impl CodingAgent {
             CodingAgent::ClaudeCode => ".mcp.json",
             CodingAgent::Opencode => "opencode.jsonc",
             CodingAgent::Codex => ".codex/config.toml",
+            CodingAgent::Cursor => ".cursor/mcp.json",
         }
     }
 }
@@ -49,6 +52,7 @@ impl fmt::Display for CodingAgent {
             CodingAgent::ClaudeCode => write!(f, "Claude Code"),
             CodingAgent::Opencode => write!(f, "Opencode"),
             CodingAgent::Codex => write!(f, "Codex"),
+            CodingAgent::Cursor => write!(f, "Cursor"),
         }
     }
 }
@@ -89,13 +93,17 @@ pub fn run_init(
         let action = match agent {
             CodingAgent::ClaudeCode => upsert_claude_code(&path)?,
             CodingAgent::Opencode => upsert_opencode(&path)?,
-            CodingAgent::Codex => {
+            CodingAgent::Codex | CodingAgent::Cursor => {
                 if let Some(parent) = path.parent()
                     && !parent.exists()
                 {
                     std::fs::create_dir_all(parent).map_err(DatabaseCliError::Io)?;
                 }
-                upsert_codex(&path)?
+                match agent {
+                    CodingAgent::Codex => upsert_codex(&path)?,
+                    CodingAgent::Cursor => upsert_claude_code(&path)?,
+                    _ => unreachable!(),
+                }
             }
         };
         agent_results.push(AgentInitResult {
@@ -575,6 +583,42 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Cursor (.cursor/mcp.json) — reuses mcpServers format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn creates_new_cursor_mcp_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let cursor_dir = dir.path().join(".cursor");
+        std::fs::create_dir(&cursor_dir).unwrap();
+        let path = cursor_dir.join("mcp.json");
+
+        let action = upsert_claude_code(&path).unwrap();
+        assert_eq!(action, FileAction::Created);
+
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            content["mcpServers"]["databasecli"]["command"],
+            "databasecli-mcp"
+        );
+    }
+
+    #[test]
+    fn run_init_creates_cursor_dir_and_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let result = run_init(Some(dir_str), &[CodingAgent::Cursor]).unwrap();
+
+        assert_eq!(result.agent_results.len(), 1);
+        assert_eq!(result.agent_results[0].agent, CodingAgent::Cursor);
+        assert_eq!(result.agent_results[0].action, FileAction::Created);
+        assert!(result.agent_results[0].path.exists());
+        assert!(dir.path().join(".cursor/mcp.json").exists());
+    }
+
+    // -----------------------------------------------------------------------
     // run_init integration
     // -----------------------------------------------------------------------
 
@@ -607,7 +651,7 @@ mod tests {
 
         let first = run_init(Some(dir_str), &CodingAgent::ALL).unwrap();
         assert_eq!(first.config_action, FileAction::Created);
-        assert_eq!(first.agent_results.len(), 3);
+        assert_eq!(first.agent_results.len(), 4);
         for r in &first.agent_results {
             assert_eq!(r.action, FileAction::Created);
         }
