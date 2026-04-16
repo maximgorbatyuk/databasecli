@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-04-16
+
+### Added
+
+- **Multi-agent MCP configuration**: The `init` command now asks which coding agents to configure MCP for, instead of always writing `.mcp.json` only. Supported agents:
+  - **Claude Code** (`.mcp.json`) — existing behavior, unchanged format
+  - **Opencode** (`opencode.jsonc`) — `mcp.databasecli` entry with `type: "local"`, `command` array, and `enabled: true`
+  - **Codex** (`.codex/config.toml`) — `[mcp_servers.databasecli]` table with `command` and `args`
+  - **Cursor** (`.cursor/mcp.json`) — same `mcpServers` format as Claude Code
+- **CLI agent selection prompt**: `databasecli init` displays a numbered list and accepts space-separated numbers (e.g. `1 3 4`). Unrecognized input prints a warning.
+- **TUI agent selection screen**: The "Initialize Project" screen now shows a checkbox list with Space to toggle, j/k to navigate, and Enter to confirm. Selection resets each time the screen is opened.
+- **JSONC comment support**: Existing `opencode.jsonc` files with `//` line comments or `/* */` block comments are parsed correctly. Comments inside JSON strings (e.g. URLs) are preserved.
+
+### Changed
+
+- **`run_init` accepts agent list**: The core `run_init()` function now takes a `&[CodingAgent]` parameter. Passing an empty slice creates only the config file without any MCP configuration.
+- **`InitResult` reports per-agent results**: Replaced the single `mcp_path`/`mcp_action` fields with `agent_results: Vec<AgentInitResult>`, each containing the agent type, file path, and action taken.
+- **Menu item description updated**: "Initialize Project" now reads "Create config and configure MCP for coding agents" instead of the previous `.mcp.json`-specific wording.
+
+### Dependencies
+
+- Added `toml` 0.8 to `databasecli-core` for Codex config file parsing and writing.
+
 ## [0.1.5] - 2026-04-03
 
 ### Added
