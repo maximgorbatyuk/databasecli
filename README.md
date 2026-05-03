@@ -11,8 +11,10 @@ Manage your databases with AI agents. A CLI, TUI, and MCP server providing secur
 ## Features
 
 - Full-screen TUI with interactive database management, health monitoring, schema browsing, and query execution
-- CLI subcommands for scripting: `list`, `health-check`, `schema`, `query`, `analyze`, `summary`, `erd`, `compare`, `trend`, `sample`
+- CLI subcommands for scripting: `list`, `health-check`, `schema`, `query`, `exec`, `analyze`, `summary`, `erd`, `compare`, `trend`, `sample`
 - MCP server exposing 14 read-only tools for AI agents (Claude Desktop, Claude Code, and other MCP clients)
+- Local SQL execution with `exec` for operators (single statement, one database, no MCP exposure)
+- Destructive statement confirmation for `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, and `ALTER` (use `--yes` to bypass)
 - Multi-database support — connect to specific databases with `--db` or all at once with `--all`
 - INI-based configuration with per-database connection settings
 - Cross-platform: macOS, Linux, Windows
@@ -105,11 +107,39 @@ databasecli list                         # list stored connections
 databasecli health-check --all           # check all databases
 databasecli schema --db production       # inspect schema
 databasecli query --db production "SELECT count(*) FROM users"
+
+# Local-only write/DDL execution. Asks `[y/N]` before destructive statements;
+# pass --yes to bypass. Single statement only; not exposed via MCP.
+databasecli exec --db staging "INSERT INTO feature_flags (name) VALUES ('beta')"
+databasecli exec --db staging --yes "DELETE FROM sessions WHERE expired_at < now()"
 ```
+
+### Choose `query` vs `exec`
+
+| Need | Use | Notes |
+| --- | --- | --- |
+| Read data (`SELECT`, `SHOW`, `EXPLAIN`, `TABLE`) | `databasecli query` | Read-only path; supports multi-db workflows |
+| Change schema/data (`INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE`, etc.) | `databasecli exec` | Local-only path on one database; destructive operations prompt unless `--yes` |
+
+### Execution safety model
+
+- `exec` is intentionally narrow in v1: one statement only, optional trailing semicolon, no `WITH`, no procedural bodies.
+- `exec` opens a short-lived writable connection with `statement_timeout = '30s'`; it does not reuse read-only MCP/query sessions.
+- `query` remains the default for all read-only exploration and analysis workflows.
 
 ## MCP Server
 
 The `databasecli-mcp` binary is a read-only MCP server that gives AI agents secure access to your PostgreSQL databases over stdio. All connections enforce read-only mode at both the server and client level.
+
+### MCP read-only guarantee (no change commands)
+
+MCP clients cannot run state-changing SQL (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, etc.). This is enforced at multiple layers:
+
+1. **No write tool on MCP surface**: there is no MCP `exec`/`execute` tool.
+2. **Read-only validator**: MCP `query`/`compare` reject write SQL and multi-statement smuggling attempts.
+3. **Database-level protection**: MCP connections are created with `SET default_transaction_read_only = on`.
+
+Write execution is reachable only through local operator paths (`databasecli exec` in CLI/TUI), and guard tests in `crates/databasecli-mcp/tests/guard.rs` ensure this boundary cannot regress silently.
 
 ### Claude Desktop
 

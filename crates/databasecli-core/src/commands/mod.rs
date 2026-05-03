@@ -1,6 +1,7 @@
 pub mod analyze;
 pub mod compare;
 pub mod erd;
+pub mod execute;
 pub mod health;
 pub mod list_databases;
 pub mod query;

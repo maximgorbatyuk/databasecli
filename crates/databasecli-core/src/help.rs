@@ -54,6 +54,12 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                         .to_string(),
                 },
                 HelpItem {
+                    name: "databasecli exec --db <name> [--yes] <sql>".to_string(),
+                    description:
+                        "Local-only write/DDL execution on one database. Prompts before destructive statements. Not exposed via MCP."
+                            .to_string(),
+                },
+                HelpItem {
                     name: "databasecli sample <table> [--limit N] [--order-by <col>] [--schema <name>]".to_string(),
                     description: "Preview rows from a table (default: 20 rows)".to_string(),
                 },
@@ -205,6 +211,10 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                     name: "14 tools".to_string(),
                     description: "list_configured, connect, disconnect, list_connected, query, schema, sample, analyze, compare, summary, erd, trend, enhanced_health, suggest_migration".to_string(),
                 },
+                HelpItem {
+                    name: "Writes via MCP".to_string(),
+                    description: "Never. INSERT/UPDATE/DELETE/DROP/TRUNCATE/ALTER/CREATE/GRANT are unavailable to MCP clients by design — only `databasecli exec` (local CLI/TUI) can run them.".to_string(),
+                },
             ],
         },
         HelpSection {
@@ -216,11 +226,19 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                 },
                 HelpItem {
                     name: "Statement timeout".to_string(),
-                    description: "SET statement_timeout = '30s' on every connection".to_string(),
+                    description: "SET statement_timeout = '30s' on every connection (read-only and writable alike)".to_string(),
                 },
                 HelpItem {
-                    name: "SQL validation".to_string(),
+                    name: "SQL validation (query)".to_string(),
                     description: "Only SELECT, WITH, EXPLAIN, SHOW, TABLE allowed. Semicolons blocked.".to_string(),
+                },
+                HelpItem {
+                    name: "exec scope (v1)".to_string(),
+                    description: "Single statement; optional trailing `;`; no WITH; no procedural bodies (DO $$ ... $$). Destructive statements (UPDATE/DELETE/DROP/TRUNCATE/ALTER) prompt unless --yes.".to_string(),
+                },
+                HelpItem {
+                    name: "exec connection".to_string(),
+                    description: "Short-lived writable connection per call; not held in the read-only ConnectionManager; never reachable from MCP.".to_string(),
                 },
                 HelpItem {
                     name: "Passwords".to_string(),

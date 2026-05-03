@@ -8,6 +8,53 @@ pub struct LiveConnection {
     pub client: postgres::Client,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionMode {
+    ReadOnly,
+    LocalExec,
+}
+
+fn open_client(
+    config: &DatabaseConfig,
+    mode: ConnectionMode,
+) -> Result<postgres::Client, DatabaseCliError> {
+    let connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| DatabaseCliError::ConnectionFailed(format!("TLS error: {e}")))?;
+    let connector = postgres_native_tls::MakeTlsConnector::new(connector);
+
+    let mut client = postgres::Client::connect(&config.connection_string(), connector)
+        .map_err(|e| DatabaseCliError::ConnectionFailed(e.to_string()))?;
+
+    let setup = match mode {
+        ConnectionMode::ReadOnly => {
+            "SET default_transaction_read_only = on; SET statement_timeout = '30s'"
+        }
+        ConnectionMode::LocalExec => "SET statement_timeout = '30s'",
+    };
+
+    client
+        .batch_execute(setup)
+        .map_err(|e| DatabaseCliError::QueryFailed(e.to_string()))?;
+
+    Ok(client)
+}
+
+/// Open a fresh writable connection for a single local CLI/TUI execution.
+///
+/// Sets `statement_timeout = '30s'` but does NOT set
+/// `default_transaction_read_only`. This connection is intended for one-shot
+/// `exec` use by the local operator and must NEVER be reachable from the
+/// MCP surface.
+pub fn connect_for_local_exec(config: &DatabaseConfig) -> Result<LiveConnection, DatabaseCliError> {
+    let client = open_client(config, ConnectionMode::LocalExec)?;
+    Ok(LiveConnection {
+        config: config.clone(),
+        client,
+    })
+}
+
 pub struct ConnectionManager {
     connections: HashMap<String, LiveConnection>,
 }
@@ -24,18 +71,7 @@ impl ConnectionManager {
             return Err(DatabaseCliError::AlreadyConnected(config.name.clone()));
         }
 
-        let connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| DatabaseCliError::ConnectionFailed(format!("TLS error: {e}")))?;
-        let connector = postgres_native_tls::MakeTlsConnector::new(connector);
-
-        let mut client = postgres::Client::connect(&config.connection_string(), connector)
-            .map_err(|e| DatabaseCliError::ConnectionFailed(e.to_string()))?;
-
-        client
-            .batch_execute("SET default_transaction_read_only = on; SET statement_timeout = '30s'")
-            .map_err(|e| DatabaseCliError::QueryFailed(e.to_string()))?;
+        let client = open_client(config, ConnectionMode::ReadOnly)?;
 
         self.connections.insert(
             config.name.clone(),

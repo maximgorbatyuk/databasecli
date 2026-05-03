@@ -49,6 +49,14 @@ pub enum Commands {
         /// The SQL query to execute
         sql: String,
     },
+    /// Execute a single write/DDL SQL statement on one database (local CLI only; not exposed via MCP)
+    Exec {
+        /// The SQL statement to execute (one statement only; no WITH, no procedural bodies)
+        sql: String,
+        /// Bypass the destructive-statement confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Profile a table: nulls, cardinality, distributions, top values
     Analyze {
         /// Table name

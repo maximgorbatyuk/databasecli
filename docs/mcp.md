@@ -9,6 +9,23 @@ All database connections enforce read-only access at two layers:
 1. **Server-side**: `SET default_transaction_read_only = on` on every connection. PostgreSQL itself rejects INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE.
 2. **Client-side**: SQL validation rejects anything that isn't SELECT, WITH, EXPLAIN, SHOW, or TABLE. Multi-statement queries (containing `;` outside string literals) are also rejected.
 
+### Writes are unavailable through MCP — by design
+
+The MCP surface exposes **no write tool**. There is no `exec`, no `execute`, no `run_sql`, no migration runner. Statements that mutate state — `INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `VACUUM`, `COPY ... FROM`, etc. — cannot be reached through any MCP tool, including `query` and `compare` (their shared validator rejects them).
+
+Write execution is only reachable through the local `databasecli exec` CLI/TUI command run by you, the operator. That path:
+
+- opens a separate, short-lived writable connection that is **not** held in the MCP-shared `ConnectionManager`;
+- still applies `statement_timeout = '30s'`;
+- requires explicit confirmation for destructive statements (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`) unless `--yes` is passed;
+- accepts a deliberately narrow SQL subset in v1 — single statement only, optional trailing semicolon, no `WITH`, no procedural bodies.
+
+This boundary is enforced by guard tests in `crates/databasecli-mcp/tests/guard.rs`:
+
+- The MCP source must never reference `execute_statement` (the only function in `databasecli-core` that runs SQL on a writable connection).
+- No MCP tool function name may imply writes.
+- The `validate_readonly` validator behind MCP `query` must keep rejecting every write classification, including multi-statement smuggling like `SELECT 1; DROP TABLE t`.
+
 Additionally:
 - Statement timeout of 30 seconds prevents runaway queries.
 - Database passwords are never exposed to the agent. Databases are referenced by name only.

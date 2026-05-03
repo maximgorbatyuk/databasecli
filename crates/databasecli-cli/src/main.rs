@@ -18,6 +18,7 @@ fn main() -> Result<()> {
         Some(Commands::HealthCheck) => run::run_health_check(&cli)?,
         Some(Commands::Schema { ref schema }) => run::run_schema(&cli, schema)?,
         Some(Commands::Query { ref sql }) => run::run_query(&cli, sql)?,
+        Some(Commands::Exec { ref sql, yes }) => run::run_exec(&cli, sql, yes)?,
         Some(Commands::Analyze {
             ref table,
             ref schema,

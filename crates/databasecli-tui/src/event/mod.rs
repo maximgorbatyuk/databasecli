@@ -1,4 +1,5 @@
 mod connect;
+mod execute;
 mod home;
 mod input;
 
@@ -43,8 +44,8 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    // Don't normalize when in input mode - user is typing text
-    let code = if app.input_mode {
+    // Don't normalize when the user is typing text into any input buffer
+    let code = if app.is_typing() {
         key.code
     } else {
         match key.code {
@@ -67,6 +68,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) {
         Screen::Query | Screen::Sample | Screen::Analyze | Screen::Compare | Screen::Trend => {
             input::handle_input_screen(app, code)
         }
+        Screen::Execute => execute::handle_execute(app, code),
     }
 }
 

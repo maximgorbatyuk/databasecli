@@ -54,6 +54,17 @@ pub enum DatabaseCliError {
     #[error("invalid interval '{0}': expected day, week, month, or year")]
     InvalidInterval(String),
 
+    #[error(
+        "statement not supported by `exec` (v1): {0}. Multi-statement input, WITH, and procedural bodies (DO $$ ... $$) are not allowed."
+    )]
+    UnsupportedExecStatement(String),
+
+    #[error("destructive statement requires confirmation; pass --yes or run interactively")]
+    ExecConfirmationRequired,
+
+    #[error("execution cancelled")]
+    ExecCancelled,
+
     #[error("database error: {0}")]
     Postgres(#[from] postgres::Error),
 }

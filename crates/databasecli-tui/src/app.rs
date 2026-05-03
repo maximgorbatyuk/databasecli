@@ -3,6 +3,7 @@ use std::fmt;
 use databasecli_core::commands::analyze::TableProfile;
 use databasecli_core::commands::compare::CompareResult;
 use databasecli_core::commands::erd::ErdResult;
+use databasecli_core::commands::execute::{ExecuteResult, StatementKind, classify_statement};
 use databasecli_core::commands::query::QueryResultSet;
 use databasecli_core::commands::sample::SampleResult;
 use databasecli_core::commands::schema::SchemaResult;
@@ -22,6 +23,7 @@ pub enum Screen {
     DatabaseHealth,
     Schema,
     Query,
+    Execute,
     Sample,
     Analyze,
     Summary,
@@ -40,6 +42,7 @@ pub enum MenuItem {
     DatabaseHealth,
     Schema,
     Query,
+    Execute,
     Sample,
     Analyze,
     Summary,
@@ -47,6 +50,14 @@ pub enum MenuItem {
     Compare,
     Trend,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutePhase {
+    PickDatabase,
+    EditSql,
+    Confirm,
+    Result,
 }
 
 impl MenuItem {
@@ -59,6 +70,7 @@ impl MenuItem {
             MenuItem::DatabaseHealth => "Check connectivity for all databases",
             MenuItem::Schema => "Full schema: tables, columns, types, PKs",
             MenuItem::Query => "Run read-only SQL query",
+            MenuItem::Execute => "Run a write/DDL SQL statement (local only; not exposed via MCP)",
             MenuItem::Sample => "Preview rows from a table",
             MenuItem::Analyze => "Profile a table: nulls, cardinality, top values",
             MenuItem::Summary => "Overview: table counts, sizes, largest tables",
@@ -78,6 +90,7 @@ impl MenuItem {
             MenuItem::DatabaseHealth => Screen::DatabaseHealth,
             MenuItem::Schema => Screen::Schema,
             MenuItem::Query => Screen::Query,
+            MenuItem::Execute => Screen::Execute,
             MenuItem::Sample => Screen::Sample,
             MenuItem::Analyze => Screen::Analyze,
             MenuItem::Summary => Screen::Summary,
@@ -93,6 +106,7 @@ impl MenuItem {
             self,
             MenuItem::Schema
                 | MenuItem::Query
+                | MenuItem::Execute
                 | MenuItem::Sample
                 | MenuItem::Analyze
                 | MenuItem::Summary
@@ -113,6 +127,7 @@ impl fmt::Display for MenuItem {
             MenuItem::DatabaseHealth => write!(f, "Database Health"),
             MenuItem::Schema => write!(f, "Schema"),
             MenuItem::Query => write!(f, "Query"),
+            MenuItem::Execute => write!(f, "Execute"),
             MenuItem::Sample => write!(f, "Sample"),
             MenuItem::Analyze => write!(f, "Analyze"),
             MenuItem::Summary => write!(f, "Summary"),
@@ -134,6 +149,7 @@ pub enum AppAction {
     DisconnectDatabases(Vec<String>),
     RunSchema,
     RunQuery(String),
+    ExecuteStatement { database: String, sql: String },
     RunSample(String),
     RunAnalyze(String),
     RunSummary,
@@ -183,6 +199,15 @@ pub struct AppState {
     pub compare_result: Option<CompareResult>,
     pub trend_result: Option<TrendResult>,
 
+    // Execute screen state — explicit phase machine instead of overloading input_mode/query_result
+    pub execute_phase: ExecutePhase,
+    pub execute_db_cursor: usize,
+    pub execute_database: Option<String>,
+    pub execute_sql_buffer: String,
+    pub execute_input_mode: bool,
+    pub execute_pending_kind: Option<StatementKind>,
+    pub execute_result: Option<ExecuteResult>,
+
     pending_action: Option<AppAction>,
 }
 
@@ -198,6 +223,7 @@ impl AppState {
         menu_items.push(MenuItem::DatabaseHealth);
         menu_items.push(MenuItem::Schema);
         menu_items.push(MenuItem::Query);
+        menu_items.push(MenuItem::Execute);
         menu_items.push(MenuItem::Sample);
         menu_items.push(MenuItem::Analyze);
         menu_items.push(MenuItem::Summary);
@@ -244,6 +270,13 @@ impl AppState {
             erd_result: None,
             compare_result: None,
             trend_result: None,
+            execute_phase: ExecutePhase::PickDatabase,
+            execute_db_cursor: 0,
+            execute_database: None,
+            execute_sql_buffer: String::new(),
+            execute_input_mode: false,
+            execute_pending_kind: None,
+            execute_result: None,
             pending_action: None,
         }
     }
@@ -308,6 +341,9 @@ impl AppState {
                 self.input_mode = true;
                 self.input_buffer.clear();
                 self.query_result = None;
+            }
+            Screen::Execute => {
+                self.enter_execute_screen();
             }
             Screen::Sample => {
                 self.input_mode = true;
@@ -402,6 +438,7 @@ impl AppState {
         self.is_loading = false;
         self.spinner_frame = 0;
         self.input_mode = false;
+        self.execute_input_mode = false;
     }
 
     pub fn on_config_created(&mut self, path: String) {
@@ -525,5 +562,304 @@ impl AppState {
 
     pub fn take_action(&mut self) -> Option<AppAction> {
         self.pending_action.take()
+    }
+
+    /// True when any screen has its text-input buffer active. Used by the key
+    /// router to suppress QWERTY normalization while the user is typing SQL.
+    /// Centralised so adding a future screen with its own input flag is a
+    /// one-line change here.
+    pub fn is_typing(&self) -> bool {
+        self.input_mode || self.execute_input_mode
+    }
+
+    // Execute screen state machine -------------------------------------------------
+
+    fn enter_execute_screen(&mut self) {
+        self.execute_sql_buffer.clear();
+        self.execute_input_mode = false;
+        self.execute_pending_kind = None;
+        self.execute_result = None;
+        self.execute_db_cursor = 0;
+
+        match self.connected_names.as_slice() {
+            [single] => {
+                self.execute_database = Some(single.clone());
+                self.execute_phase = ExecutePhase::EditSql;
+                self.execute_input_mode = true;
+            }
+            [] => unreachable!(
+                "MenuItem::Execute::requires_connection() must prevent activation when no databases are connected"
+            ),
+            _ => {
+                self.execute_database = None;
+                self.execute_phase = ExecutePhase::PickDatabase;
+            }
+        }
+    }
+
+    pub fn execute_picker_up(&mut self) {
+        if self.execute_db_cursor > 0 {
+            self.execute_db_cursor -= 1;
+        }
+    }
+
+    pub fn execute_picker_down(&mut self) {
+        if self.execute_db_cursor + 1 < self.connected_names.len() {
+            self.execute_db_cursor += 1;
+        }
+    }
+
+    pub fn execute_picker_confirm(&mut self) {
+        if let Some(name) = self.connected_names.get(self.execute_db_cursor) {
+            self.execute_database = Some(name.clone());
+            self.execute_phase = ExecutePhase::EditSql;
+            self.execute_input_mode = true;
+            self.execute_sql_buffer.clear();
+            self.error_message = None;
+        }
+    }
+
+    pub fn execute_submit_sql(&mut self) {
+        let sql = self.execute_sql_buffer.trim().to_string();
+        if sql.is_empty() {
+            return;
+        }
+        self.execute_input_mode = false;
+        self.error_message = None;
+
+        let kind = classify_statement(&sql);
+        match kind {
+            StatementKind::Read => {
+                self.error_message =
+                    Some("Read-only SQL — use the Query screen instead.".to_string());
+                self.execute_input_mode = true;
+            }
+            StatementKind::Unsupported => {
+                self.error_message = Some(
+                    "Statement not supported by Execute (no WITH, no procedural bodies, single statement only)."
+                        .to_string(),
+                );
+                self.execute_input_mode = true;
+            }
+            StatementKind::Destructive => {
+                self.execute_pending_kind = Some(kind);
+                self.execute_phase = ExecutePhase::Confirm;
+            }
+            StatementKind::Write => {
+                self.execute_pending_kind = Some(kind);
+                self.dispatch_execute();
+            }
+        }
+    }
+
+    pub fn execute_confirm_yes(&mut self) {
+        if self.execute_phase != ExecutePhase::Confirm {
+            return;
+        }
+        self.dispatch_execute();
+    }
+
+    pub fn execute_confirm_no(&mut self) {
+        if self.execute_phase != ExecutePhase::Confirm {
+            return;
+        }
+        self.execute_phase = ExecutePhase::EditSql;
+        self.execute_pending_kind = None;
+        self.execute_input_mode = true;
+    }
+
+    fn dispatch_execute(&mut self) {
+        let Some(database) = self.execute_database.clone() else {
+            self.error_message = Some("No database selected.".to_string());
+            return;
+        };
+        let sql = self.execute_sql_buffer.trim().to_string();
+        if sql.is_empty() {
+            self.error_message = Some("SQL is empty.".to_string());
+            return;
+        }
+        self.execute_phase = ExecutePhase::Result;
+        self.execute_result = None;
+        self.is_loading = true;
+        self.pending_action = Some(AppAction::ExecuteStatement { database, sql });
+    }
+
+    pub fn on_execute_completed(&mut self, result: ExecuteResult) {
+        self.execute_result = Some(result);
+        self.execute_phase = ExecutePhase::Result;
+        self.is_loading = false;
+        self.execute_pending_kind = None;
+    }
+
+    pub fn on_execute_failed(&mut self, message: String) {
+        self.error_message = Some(message);
+        self.execute_phase = ExecutePhase::EditSql;
+        self.execute_input_mode = true;
+        self.execute_pending_kind = None;
+        self.is_loading = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with_connections(names: &[&str]) -> AppState {
+        let mut app = AppState::new(true, "test".to_string(), None);
+        app.update_connection_state(names.iter().map(|s| s.to_string()).collect());
+        // Activate via menu so requires_connection logic still applies.
+        let idx = app
+            .menu_items
+            .iter()
+            .position(|m| matches!(m, MenuItem::Execute))
+            .expect("Execute menu item exists");
+        app.selected = idx;
+        app.activate_selected();
+        app
+    }
+
+    #[test]
+    fn one_connected_database_skips_picker() {
+        let app = app_with_connections(&["only"]);
+        assert_eq!(app.execute_phase, ExecutePhase::EditSql);
+        assert_eq!(app.execute_database.as_deref(), Some("only"));
+        assert!(app.execute_input_mode, "input mode should be on");
+    }
+
+    #[test]
+    fn multiple_connected_databases_enter_picker() {
+        let app = app_with_connections(&["alpha", "beta"]);
+        assert_eq!(app.execute_phase, ExecutePhase::PickDatabase);
+        assert_eq!(app.execute_database, None);
+        assert!(!app.execute_input_mode);
+    }
+
+    #[test]
+    fn picker_confirm_sets_database_and_advances() {
+        let mut app = app_with_connections(&["alpha", "beta"]);
+        app.execute_picker_down();
+        app.execute_picker_confirm();
+        assert_eq!(app.execute_phase, ExecutePhase::EditSql);
+        assert_eq!(app.execute_database.as_deref(), Some("beta"));
+        assert!(app.execute_input_mode);
+    }
+
+    #[test]
+    fn destructive_statement_enters_confirm_phase() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "DELETE FROM t".to_string();
+        app.execute_submit_sql();
+        assert_eq!(app.execute_phase, ExecutePhase::Confirm);
+        assert_eq!(app.execute_pending_kind, Some(StatementKind::Destructive));
+        assert!(app.pending_action.is_none(), "must wait for confirmation");
+    }
+
+    #[test]
+    fn write_statement_dispatches_immediately() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "INSERT INTO t VALUES (1)".to_string();
+        app.execute_submit_sql();
+        assert_eq!(app.execute_phase, ExecutePhase::Result);
+        assert!(app.is_loading);
+        match app.take_action() {
+            Some(AppAction::ExecuteStatement { database, sql }) => {
+                assert_eq!(database, "only");
+                assert_eq!(sql, "INSERT INTO t VALUES (1)");
+            }
+            other => panic!("expected ExecuteStatement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_statement_in_exec_is_rejected_with_error() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "SELECT 1".to_string();
+        app.execute_submit_sql();
+        assert_eq!(app.execute_phase, ExecutePhase::EditSql);
+        assert!(app.execute_input_mode);
+        assert!(
+            app.error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("Read-only"),
+            "expected read-only guidance, got: {:?}",
+            app.error_message
+        );
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn unsupported_statement_in_exec_is_rejected_with_error() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "WITH x AS (SELECT 1) SELECT * FROM x".to_string();
+        app.execute_submit_sql();
+        assert_eq!(app.execute_phase, ExecutePhase::EditSql);
+        assert!(app.execute_input_mode);
+        assert!(app.error_message.is_some());
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn confirm_no_returns_to_editor_without_dispatch() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "DROP TABLE t".to_string();
+        app.execute_submit_sql();
+        assert_eq!(app.execute_phase, ExecutePhase::Confirm);
+        app.execute_confirm_no();
+        assert_eq!(app.execute_phase, ExecutePhase::EditSql);
+        assert_eq!(app.execute_pending_kind, None);
+        assert!(app.execute_input_mode);
+        assert!(app.pending_action.is_none());
+        // Buffer is preserved so the user can edit instead of retyping.
+        assert_eq!(app.execute_sql_buffer, "DROP TABLE t");
+    }
+
+    #[test]
+    fn confirm_yes_dispatches_destructive_action() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "DROP TABLE t".to_string();
+        app.execute_submit_sql();
+        assert_eq!(app.execute_phase, ExecutePhase::Confirm);
+        app.execute_confirm_yes();
+        assert_eq!(app.execute_phase, ExecutePhase::Result);
+        assert!(app.is_loading);
+        match app.take_action() {
+            Some(AppAction::ExecuteStatement { database, sql }) => {
+                assert_eq!(database, "only");
+                assert_eq!(sql, "DROP TABLE t");
+            }
+            other => panic!("expected ExecuteStatement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_completion_populates_result_and_clears_loading() {
+        use databasecli_core::commands::execute::ExecuteResult;
+        use std::time::Duration;
+
+        let mut app = app_with_connections(&["only"]);
+        app.is_loading = true;
+        app.on_execute_completed(ExecuteResult {
+            database_name: "only".to_string(),
+            command_tag: "DELETE 3".to_string(),
+            affected_rows: Some(3),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            execution_time: Duration::from_millis(1),
+        });
+        assert_eq!(app.execute_phase, ExecutePhase::Result);
+        assert!(!app.is_loading);
+        assert!(app.execute_result.is_some());
+    }
+
+    #[test]
+    fn execute_failure_returns_user_to_editor() {
+        let mut app = app_with_connections(&["only"]);
+        app.is_loading = true;
+        app.on_execute_failed("connection refused".to_string());
+        assert_eq!(app.execute_phase, ExecutePhase::EditSql);
+        assert!(app.execute_input_mode);
+        assert!(!app.is_loading);
+        assert_eq!(app.error_message.as_deref(), Some("connection refused"));
     }
 }

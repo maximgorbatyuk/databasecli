@@ -300,7 +300,11 @@ impl ServerHandler for DatabaseCliServer {
                  connect_databases to establish connections, then use query/schema/sample/analyze/\
                  compare/summary/erd/trend/enhanced_health to explore data. \
                  suggest_migration provides schema context for DDL planning but never executes DDL. \
-                 All operations are strictly read-only."
+                 All operations are strictly read-only — INSERT, UPDATE, DELETE, DROP, TRUNCATE, \
+                 ALTER, CREATE, GRANT, and other write or DDL statements are unavailable to MCP \
+                 clients by design. Connections are opened with `default_transaction_read_only = on`. \
+                 Write execution is reachable only via the local `databasecli exec` CLI/TUI command \
+                 run by the operator."
                     .to_string(),
             )
     }

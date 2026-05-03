@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-05-03
+
+### Added
+
+- **Local SQL execution (`exec`)**: New CLI subcommand `databasecli exec --db <name> [--yes] "<SQL>"` and matching TUI screen run a single write/DDL statement against one configured database. Uses a fresh, short-lived writable connection (still capped at `statement_timeout = '30s'`) — read-only sessions held by `ConnectionManager` are never mutated.
+- **Destructive-statement confirmation**: `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, and `ALTER` prompt `Execute <KIND> on <db>? [y/N]` in the CLI; `--yes` bypasses. The TUI shows an explicit `Confirm` phase between SQL entry and execution. Non-interactive CLI runs without `--yes` fail fast instead of blocking.
+- **TUI `Execute` screen**: Phase machine — `PickDatabase` (skipped when one DB is connected, otherwise picker over connected names) → `EditSql` → `Confirm` (destructive only) → `Result`. Esc cancels; non-destructive writes run immediately.
+- **MCP read-only guards (tests)**: New `databasecli-mcp/tests/guard.rs` enforces that the MCP source never references `execute_statement`, no MCP tool function name implies writes, and `validate_readonly` keeps rejecting `INSERT/UPDATE/DELETE/DROP/TRUNCATE/ALTER/CREATE/GRANT` plus multi-statement smuggling.
+
+### Changed
+
+- **MCP `get_info()` instructions**: Server description now spells out that writes (`INSERT/UPDATE/DELETE/DROP/TRUNCATE/ALTER/CREATE/GRANT`, etc.) are unavailable to MCP clients by design and only reachable via the local `databasecli exec` operator path.
+
+### Security
+
+- `exec` v1 deliberately accepts a narrow SQL subset: single statement only, optional trailing semicolon, no `WITH` (writable CTEs cannot be classified safely), no procedural bodies (`DO $$ ... $$`, function definitions). Anything else is rejected before execution. The MCP surface is unchanged and remains strictly read-only — the new write path is local-only by construction and verified by guard tests.
+
 ## [0.1.6] - 2026-04-16
 
 ### Added

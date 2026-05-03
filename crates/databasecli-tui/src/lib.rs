@@ -20,6 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use databasecli_core::commands::analyze::analyze_table;
 use databasecli_core::commands::compare::compare_query;
 use databasecli_core::commands::erd::build_erd;
+use databasecli_core::commands::execute::{ExecuteResult, execute_statement};
 use databasecli_core::commands::query::execute_query;
 use databasecli_core::commands::sample::sample_table;
 use databasecli_core::commands::schema::dump_schema;
@@ -29,7 +30,7 @@ use databasecli_core::config::{
     config_exists_with_base, create_default_config, load_databases, load_settings,
     resolve_config_path_with_base,
 };
-use databasecli_core::connection::ConnectionManager;
+use databasecli_core::connection::{ConnectionManager, connect_for_local_exec};
 use databasecli_core::health::check_all_health;
 
 use app::{AppAction, AppState};
@@ -64,6 +65,7 @@ enum BackgroundResult {
     Erd(Result<databasecli_core::commands::erd::ErdResult, String>),
     Compare(Result<databasecli_core::commands::compare::CompareResult, String>),
     Trend(Result<databasecli_core::commands::trend::TrendResult, String>),
+    Execute(Result<ExecuteResult, String>),
 }
 
 fn run_loop(
@@ -248,6 +250,29 @@ fn run_loop(
                                 )));
                             }
                         }
+                    });
+                }
+                AppAction::ExecuteStatement { database, sql } => {
+                    let directory_for_bg = app.directory.clone();
+                    let (tx, rx) = mpsc::channel();
+                    bg_rx = Some(rx);
+                    // NOTE: Execute opens its own short-lived writable connection. It
+                    // does NOT mutate through the read-only sessions held by
+                    // ConnectionManager, and it is intentionally not surfaced via MCP.
+                    thread::spawn(move || {
+                        let outcome = (|| -> Result<ExecuteResult, String> {
+                            let path = resolve_config_path_with_base(directory_for_bg.as_deref())
+                                .map_err(|e| e.to_string())?;
+                            let configs = load_databases(&path).map_err(|e| e.to_string())?;
+                            let config =
+                                configs.iter().find(|c| c.name == database).ok_or_else(|| {
+                                    format!("No configured database named '{database}'")
+                                })?;
+                            let mut conn =
+                                connect_for_local_exec(config).map_err(|e| e.to_string())?;
+                            execute_statement(&mut conn, &sql).map_err(|e| e.to_string())
+                        })();
+                        let _ = tx.send(BackgroundResult::Execute(outcome));
                     });
                 }
                 AppAction::RunSample(table_name) => {
@@ -469,6 +494,12 @@ fn run_loop(
                         }
                         BackgroundResult::Trend(Err(e)) => {
                             app.error_message = Some(e);
+                        }
+                        BackgroundResult::Execute(Ok(result)) => {
+                            app.on_execute_completed(result);
+                        }
+                        BackgroundResult::Execute(Err(e)) => {
+                            app.on_execute_failed(e);
                         }
                     }
                     app.is_loading = false;

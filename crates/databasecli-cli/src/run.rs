@@ -4,6 +4,9 @@ use databasecli_core::commands::compare::{compare_query, format_compare_result};
 use databasecli_core::commands::erd::{
     build_erd, format_erd_ascii, format_erd_dot, format_erd_mermaid,
 };
+use databasecli_core::commands::execute::{
+    StatementKind, execute_normalized, format_execute_result, validate_single_statement,
+};
 use databasecli_core::commands::health::{check_all_enhanced_health, format_enhanced_health_table};
 use databasecli_core::commands::list_databases::{format_connected_table, list_connected};
 use databasecli_core::commands::query::{execute_query, format_query_result};
@@ -14,7 +17,8 @@ use databasecli_core::commands::trend::{TrendInterval, TrendParams, compute_tren
 use databasecli_core::config::{
     Settings, load_databases, load_settings, resolve_config_path_with_base,
 };
-use databasecli_core::connection::ConnectionManager;
+use databasecli_core::connection::{ConnectionManager, connect_for_local_exec};
+use databasecli_core::error::DatabaseCliError;
 use databasecli_core::health::{check_all_health, format_health_table};
 
 use databasecli_core::help::{build_help_sections, format_help_text};
@@ -242,6 +246,74 @@ pub fn run_query(cli: &Cli, sql: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn run_exec(cli: &Cli, sql: &str, yes: bool) -> Result<()> {
+    use std::io::IsTerminal;
+
+    if cli.all_databases {
+        anyhow::bail!("`exec` requires exactly one --db <name>; --all is not supported");
+    }
+    let db_name = match cli.databases.as_slice() {
+        [name] => name.clone(),
+        [] => anyhow::bail!("`exec` requires exactly one --db <name>"),
+        _ => anyhow::bail!(
+            "`exec` accepts only one --db <name>; got {}",
+            cli.databases.len()
+        ),
+    };
+
+    let path = resolve_config_path_with_base(cli.directory.as_deref())?;
+    let configs = load_databases(&path)?;
+    let config = configs
+        .iter()
+        .find(|c| c.name == db_name)
+        .ok_or_else(|| anyhow::anyhow!("No configured database named '{db_name}'"))?;
+
+    // Validate once. The kind drives the dispatch + prompt; the normalized form
+    // flows into execute_normalized so the validator never runs twice.
+    let normalized = validate_single_statement(sql)?;
+    match normalized.kind() {
+        StatementKind::Read => anyhow::bail!(
+            "`exec` is for write/DDL statements only. For read-only SQL use `databasecli query`."
+        ),
+        StatementKind::Unsupported => anyhow::bail!(
+            "leading keyword `{}` is not supported by `exec` v1",
+            normalized.first_keyword
+        ),
+        StatementKind::Destructive if !yes => {
+            if !std::io::stdin().is_terminal() {
+                return Err(anyhow::anyhow!(DatabaseCliError::ExecConfirmationRequired));
+            }
+            if !prompt_destructive_confirmation(&normalized, &db_name)? {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+        StatementKind::Destructive | StatementKind::Write => {}
+    }
+
+    let mut conn = connect_for_local_exec(config)?;
+    let result = execute_normalized(&mut conn, &normalized)?;
+    print!("{}", format_execute_result(&result));
+    Ok(())
+}
+
+fn prompt_destructive_confirmation(
+    normalized: &databasecli_core::commands::execute::NormalizedStatement,
+    db: &str,
+) -> Result<bool> {
+    use std::io::{Write, stdin, stdout};
+    println!(
+        "About to run a {} statement on {db}:",
+        normalized.first_keyword
+    );
+    println!("  {}", normalized.sql);
+    print!("This will modify the database. Proceed? [y/N] ");
+    stdout().flush()?;
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+    Ok(matches!(input.trim(), "y" | "Y"))
+}
+
 pub fn run_sample(
     cli: &Cli,
     table: &str,
@@ -329,4 +401,65 @@ pub fn run_erd(cli: &Cli, schema: &str, format: &str, output: Option<&str>) -> R
         print!("{all_output}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::Cli;
+    use clap::Parser;
+
+    fn cli_with(args: &[&str]) -> Cli {
+        let mut full = vec!["databasecli"];
+        full.extend_from_slice(args);
+        Cli::parse_from(full)
+    }
+
+    #[test]
+    fn exec_rejects_all_flag() {
+        let cli = cli_with(&["--all", "exec", "DELETE FROM t"]);
+        let err = run_exec(&cli, "DELETE FROM t", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--all is not supported"),
+            "expected --all rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_rejects_zero_db() {
+        let cli = cli_with(&["exec", "DELETE FROM t"]);
+        let err = run_exec(&cli, "DELETE FROM t", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires exactly one --db"),
+            "expected zero-db rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_rejects_multiple_dbs() {
+        let cli = cli_with(&["--db", "a", "--db", "b", "exec", "DELETE FROM t"]);
+        let err = run_exec(&cli, "DELETE FROM t", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("only one --db"),
+            "expected multi-db rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_yes_flag_parses() {
+        // Confirms the flag is wired through clap; behavior is verified via run_exec
+        // (here we just need a Cli that parses cleanly with --yes).
+        let cli = cli_with(&["--db", "a", "exec", "--yes", "DELETE FROM t"]);
+        // Sanity: still reaches our validation (will fail later trying to load the
+        // config file, since 'a' isn't real — but that proves we passed --yes parsing).
+        let err = run_exec(&cli, "DELETE FROM t", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("requires exactly one --db") && !msg.contains("--all"),
+            "selection rules should pass with one --db; got: {msg}"
+        );
+    }
 }

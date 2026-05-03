@@ -4,6 +4,7 @@ mod connect;
 mod create_config;
 mod databases;
 mod erd;
+mod execute;
 mod health;
 mod help;
 mod home;
@@ -31,6 +32,7 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         Screen::DatabaseHealth => health::draw_database_health(frame, app, area),
         Screen::Schema => schema::draw_schema(frame, app, area),
         Screen::Query => query::draw_query(frame, app, area),
+        Screen::Execute => execute::draw_execute(frame, app, area),
         Screen::Sample => sample::draw_sample(frame, app, area),
         Screen::Analyze => analyze::draw_analyze(frame, app, area),
         Screen::Summary => summary::draw_summary(frame, app, area),
