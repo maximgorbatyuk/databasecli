@@ -444,9 +444,7 @@ fn format_table_when_rows_returned() {
     );
     assert!(out.contains("(0.012s)"), "expected seconds, got: {out}");
     let table_pos = out.find("alice").expect("table row should appear");
-    let summary_pos = out
-        .find("1 row affected")
-        .expect("summary should appear");
+    let summary_pos = out.find("1 row affected").expect("summary should appear");
     assert!(
         table_pos < summary_pos,
         "summary must follow the table, got: {out}"
