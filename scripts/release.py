@@ -167,8 +167,20 @@ def switch_branch(branch: str) -> None:
 
 
 def update_version(version: str) -> None:
-    """Update the workspace version in Cargo.toml."""
+    """Update the workspace version in Cargo.toml.
+
+    Idempotent: if Cargo.toml is already at the target version (operator
+    pre-bumped it, or a previous release attempt got this far before failing
+    elsewhere), the function logs and returns. `cargo check` is still run so
+    Cargo.lock stays consistent.
+    """
     print(f"\n--- Updating version to {version} ---")
+
+    current = read_current_version()
+    if current == version:
+        print(f"  Cargo.toml already at version \"{version}\"; skipping rewrite")
+        run(["cargo", "check", "--workspace"])
+        return
 
     content = CARGO_TOML.read_text()
     updated = re.sub(
@@ -191,10 +203,20 @@ def update_version(version: str) -> None:
 
 
 def commit_and_push_version(version: str) -> None:
-    """Commit the version bump and push to dev."""
+    """Commit the version bump (when one exists) and push to dev.
+
+    Idempotent: if Cargo.toml/Cargo.lock are already committed at the target
+    version (e.g. they landed in the earlier auto-commit step), there is no
+    version-bump diff to commit. We still push dev so any prior commits on
+    the local branch make it to the remote.
+    """
     print(f"\n--- Committing version bump ---")
     run(["git", "add", "Cargo.toml", "Cargo.lock"])
-    run(["git", "commit", "-m", f"chore: bump version to {version}"])
+    diff_check = run(["git", "diff", "--cached", "--quiet"], check=False)
+    if diff_check.returncode == 0:
+        print("  No version-bump diff to commit; pushing dev as-is")
+    else:
+        run(["git", "commit", "-m", f"chore: bump version to {version}"])
     run(["git", "push", "origin", "dev"])
 
 
