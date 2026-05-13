@@ -125,7 +125,8 @@ All commands run from the repository root unless noted otherwise.
 | Health check (basic) | `databasecli health` | [`crates/databasecli-core/src/health.rs`](crates/databasecli-core/src/health.rs) |
 | Enhanced health (version, size, uptime) | `databasecli health-check --all` | [`crates/databasecli-core/src/commands/health.rs`](crates/databasecli-core/src/commands/health.rs) |
 | Read-only SQL | `databasecli query --db <name> "<SQL>"` | [`crates/databasecli-core/src/commands/query.rs`](crates/databasecli-core/src/commands/query.rs) |
-| Local-only write/DDL | `databasecli exec --db <name> [--yes] "<SQL>"` | [`crates/databasecli-core/src/commands/execute.rs`](crates/databasecli-core/src/commands/execute.rs) |
+| Local-only write/DDL (inline) | `databasecli exec --db <name> [--yes] "<SQL>"` | [`crates/databasecli-core/src/commands/execute.rs`](crates/databasecli-core/src/commands/execute.rs) |
+| Local-only write/DDL (script) | `databasecli exec --db <name> --file <PATH> [--transaction] [--yes]` | [`crates/databasecli-core/src/commands/execute.rs`](crates/databasecli-core/src/commands/execute.rs) |
 | Full reference of CLI subcommands | `databasecli reference` | [`crates/databasecli-core/src/help.rs`](crates/databasecli-core/src/help.rs) |
 | Cut a release | `./scripts/release.py [X.Y.Z]` | [`scripts/release.py`](scripts/release.py) |
 
@@ -184,19 +185,28 @@ The command interactively asks which coding agents to configure for MCP, creates
    databasecli query --db production "SELECT count(*) FROM users"
 
    # Local-only write/DDL execution. Asks `[y/N]` before destructive statements;
-   # pass --yes to bypass. Single statement only; not exposed via MCP.
+   # pass --yes to bypass. Not exposed via MCP.
    databasecli exec --db staging "INSERT INTO feature_flags (name) VALUES ('beta')"
    databasecli exec --db staging --yes "DELETE FROM sessions WHERE expired_at < now()"
+
+   # WITH ... DML chains are accepted (severity is the worst verb across all CTEs).
+   databasecli exec --db staging --yes \
+     "WITH ev AS (INSERT INTO events (slug) VALUES ('dev') RETURNING id)
+      INSERT INTO log (event_id) SELECT id FROM ev"
+
+   # Multi-statement scripts: BEGIN/COMMIT, SAVEPOINT, SET, seed fixtures.
+   databasecli exec --db staging --file db/seed.sql
+   databasecli exec --db staging --file db/migrate.sql --transaction --yes
    ```
 
 ### `query` vs `exec`
 
 | Need | Use | Notes |
 |------|-----|-------|
-| Read data (`SELECT`, `SHOW`, `EXPLAIN`, `TABLE`, `WITH`) | `databasecli query` | Read-only path; supports `--db <name>` and `--all` for multi-database workflows |
-| Change schema/data (`INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE`, etc.) | `databasecli exec` | Local-only path on one database; destructive verbs prompt unless `--yes` |
+| Read data (`SELECT`, `SHOW`, `EXPLAIN`, `TABLE`, `WITH ... SELECT`) | `databasecli query` | Read-only path; supports `--db <name>` and `--all` for multi-database workflows |
+| Change schema/data (`INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE`, `WITH ... DML`, ...) | `databasecli exec` | Local-only path on one database; destructive verbs prompt unless `--yes` |
 
-`exec` is intentionally narrow in v1: one statement only, optional trailing semicolon, no `WITH`, no procedural bodies. See [`docs/gotchas.md`](docs/gotchas.md) for the full list of unsupported forms.
+The inline form accepts one statement (including a `WITH ... INSERT|UPDATE|DELETE` chain). The `--file` form accepts a multi-statement script with transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`/`SET`). Procedural bodies (`DO $$ ... $$`, function definitions) and `COPY` remain unsupported in both forms — see [`docs/gotchas.md`](docs/gotchas.md) for the full list.
 
 ## MCP server
 

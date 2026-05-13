@@ -49,11 +49,28 @@ pub enum Commands {
         /// The SQL query to execute
         sql: String,
     },
-    /// Execute a single write/DDL SQL statement on one database (local CLI only; not exposed via MCP)
+    /// Execute write/DDL SQL on one database (local CLI only; not exposed via MCP)
+    ///
+    /// Inline form runs a single statement. Use `--file` for multi-statement
+    /// scripts (BEGIN/COMMIT, WITH ... DML chains, seed files). Procedural
+    /// bodies (`DO $$ ... $$`), dollar-quoted strings, and `COPY` are not
+    /// supported in either form.
     Exec {
-        /// The SQL statement to execute (one statement only; no WITH, no procedural bodies)
-        sql: String,
-        /// Bypass the destructive-statement confirmation prompt
+        /// The SQL statement to execute. Single statement only; may be a
+        /// `WITH ... <INSERT|UPDATE|DELETE>` chain. Required unless `--file`
+        /// is given.
+        sql: Option<String>,
+        /// Read SQL from a file. Supports multiple `;`-separated statements
+        /// including transaction control (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/SET).
+        #[arg(short = 'f', long = "file", conflicts_with = "sql")]
+        file: Option<String>,
+        /// Wrap the file's statements in a single BEGIN/COMMIT transaction.
+        /// Use this when your file does not already manage transactions and
+        /// you want all-or-nothing rollback on the first failure. Ignored
+        /// for inline SQL.
+        #[arg(long = "transaction", requires = "file")]
+        transaction: bool,
+        /// Bypass the destructive-statement confirmation prompt.
         #[arg(long)]
         yes: bool,
     },

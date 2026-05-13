@@ -5,7 +5,8 @@ use databasecli_core::commands::erd::{
     build_erd, format_erd_ascii, format_erd_dot, format_erd_mermaid,
 };
 use databasecli_core::commands::execute::{
-    StatementKind, execute_normalized, format_execute_result, validate_single_statement,
+    ScriptStatement, StatementKind, execute_normalized, execute_script, format_execute_result,
+    format_script_results, split_script, validate_single_statement,
 };
 use databasecli_core::commands::health::{check_all_enhanced_health, format_enhanced_health_table};
 use databasecli_core::commands::list_databases::{format_connected_table, list_connected};
@@ -246,9 +247,13 @@ pub fn run_query(cli: &Cli, sql: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_exec(cli: &Cli, sql: &str, yes: bool) -> Result<()> {
-    use std::io::IsTerminal;
-
+pub fn run_exec(
+    cli: &Cli,
+    sql: Option<&str>,
+    file: Option<&str>,
+    transaction: bool,
+    yes: bool,
+) -> Result<()> {
     if cli.all_databases {
         anyhow::bail!("`exec` requires exactly one --db <name>; --all is not supported");
     }
@@ -261,6 +266,24 @@ pub fn run_exec(cli: &Cli, sql: &str, yes: bool) -> Result<()> {
         ),
     };
 
+    match (sql, file) {
+        (Some(sql), None) => {
+            if transaction {
+                anyhow::bail!("`--transaction` is only valid with `--file`");
+            }
+            run_exec_inline(cli, &db_name, sql, yes)
+        }
+        (None, Some(file_path)) => run_exec_file(cli, &db_name, file_path, transaction, yes),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("provide either inline SQL or `--file <PATH>`, not both")
+        }
+        (None, None) => anyhow::bail!("provide SQL inline or via `--file <PATH>`"),
+    }
+}
+
+fn run_exec_inline(cli: &Cli, db_name: &str, sql: &str, yes: bool) -> Result<()> {
+    use std::io::IsTerminal;
+
     let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
     let config = configs
@@ -268,8 +291,6 @@ pub fn run_exec(cli: &Cli, sql: &str, yes: bool) -> Result<()> {
         .find(|c| c.name == db_name)
         .ok_or_else(|| anyhow::anyhow!("No configured database named '{db_name}'"))?;
 
-    // Validate once. The kind drives the dispatch + prompt; the normalized form
-    // flows into execute_normalized so the validator never runs twice.
     let normalized = validate_single_statement(sql)?;
     match normalized.kind() {
         StatementKind::Read => anyhow::bail!(
@@ -283,7 +304,12 @@ pub fn run_exec(cli: &Cli, sql: &str, yes: bool) -> Result<()> {
             if !std::io::stdin().is_terminal() {
                 return Err(anyhow::anyhow!(DatabaseCliError::ExecConfirmationRequired));
             }
-            if !prompt_destructive_confirmation(&normalized, &db_name)? {
+            let summary = format!(
+                "  {} statement: {}",
+                describe_verb(&normalized.effective_verb, &normalized.first_keyword),
+                normalized.sql
+            );
+            if !prompt_destructive_confirmation(db_name, &[summary])? {
                 println!("Cancelled.");
                 return Ok(());
             }
@@ -297,16 +323,129 @@ pub fn run_exec(cli: &Cli, sql: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn prompt_destructive_confirmation(
-    normalized: &databasecli_core::commands::execute::NormalizedStatement,
-    db: &str,
-) -> Result<bool> {
+fn run_exec_file(
+    cli: &Cli,
+    db_name: &str,
+    file_path: &str,
+    transaction: bool,
+    yes: bool,
+) -> Result<()> {
+    use std::io::IsTerminal;
+
+    let script_text = std::fs::read_to_string(file_path)
+        .map_err(|e| anyhow::anyhow!("failed to read `{file_path}`: {e}"))?;
+
+    let path = resolve_config_path_with_base(cli.directory.as_deref())?;
+    let configs = load_databases(&path)?;
+    let config = configs
+        .iter()
+        .find(|c| c.name == db_name)
+        .ok_or_else(|| anyhow::anyhow!("No configured database named '{db_name}'"))?;
+
+    let mut statements = split_script(&script_text)?;
+
+    // Reject obviously-unsupported and read-only chunks up front with line
+    // context so the operator can fix the file without round-tripping through
+    // a half-executed run.
+    for entry in &statements {
+        match entry.statement.kind() {
+            StatementKind::Read => anyhow::bail!(
+                "line {}: read-only SQL is not supported by `exec`. Use `databasecli query` for SELECT chains.",
+                entry.start_line
+            ),
+            StatementKind::Unsupported => anyhow::bail!(
+                "line {}: leading keyword `{}` is not supported by `exec` v1",
+                entry.start_line,
+                entry.statement.first_keyword
+            ),
+            StatementKind::Write | StatementKind::Destructive => {}
+        }
+    }
+
+    if transaction {
+        statements = wrap_in_transaction(statements);
+    }
+
+    let destructive: Vec<String> = statements
+        .iter()
+        .filter(|s| s.statement.kind() == StatementKind::Destructive)
+        .map(|s| {
+            format!(
+                "  line {}: {} — {}",
+                s.start_line,
+                describe_verb(&s.statement.effective_verb, &s.statement.first_keyword),
+                truncate_for_display(&s.statement.sql, 120)
+            )
+        })
+        .collect();
+
+    if !destructive.is_empty() && !yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(anyhow::anyhow!(DatabaseCliError::ExecConfirmationRequired));
+        }
+        if !prompt_destructive_confirmation(db_name, &destructive)? {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let mut conn = connect_for_local_exec(config)?;
+    let results = execute_script(&mut conn, &statements)?;
+    print!("{}", format_script_results(&statements, &results));
+    Ok(())
+}
+
+fn wrap_in_transaction(mut statements: Vec<ScriptStatement>) -> Vec<ScriptStatement> {
+    // Build BEGIN/COMMIT ScriptStatement entries that go through the same
+    // validator the operator's statements did, so the executor treats them
+    // identically. line=0 marks them as injected so result formatting can
+    // distinguish them from operator-written lines if desired later.
+    let begin = validate_single_statement("BEGIN").expect("BEGIN validates");
+    let commit = validate_single_statement("COMMIT").expect("COMMIT validates");
+    let mut out = Vec::with_capacity(statements.len() + 2);
+    out.push(ScriptStatement {
+        statement: begin,
+        start_line: 0,
+    });
+    out.append(&mut statements);
+    out.push(ScriptStatement {
+        statement: commit,
+        start_line: 0,
+    });
+    out
+}
+
+fn describe_verb(effective: &str, first: &str) -> String {
+    if effective == first {
+        effective.to_string()
+    } else {
+        format!("{first} → {effective}")
+    }
+}
+
+fn truncate_for_display(s: &str, max: usize) -> String {
+    let collapsed: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if collapsed.chars().count() <= max {
+        collapsed
+    } else {
+        let head: String = collapsed.chars().take(max).collect();
+        format!("{head}…")
+    }
+}
+
+fn prompt_destructive_confirmation(db: &str, items: &[String]) -> Result<bool> {
     use std::io::{Write, stdin, stdout};
-    println!(
-        "About to run a {} statement on {db}:",
-        normalized.first_keyword
-    );
-    println!("  {}", normalized.sql);
+    if items.len() == 1 {
+        println!("About to run a destructive statement on {db}:");
+    } else {
+        println!(
+            "About to run {} destructive statements on {db}:",
+            items.len()
+        );
+    }
+    for item in items {
+        println!("{item}");
+    }
     print!("This will modify the database. Proceed? [y/N] ");
     stdout().flush()?;
     let mut input = String::new();
@@ -418,7 +557,7 @@ mod tests {
     #[test]
     fn exec_rejects_all_flag() {
         let cli = cli_with(&["--all", "exec", "DELETE FROM t"]);
-        let err = run_exec(&cli, "DELETE FROM t", false).unwrap_err();
+        let err = run_exec(&cli, Some("DELETE FROM t"), None, false, false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("--all is not supported"),
@@ -429,7 +568,7 @@ mod tests {
     #[test]
     fn exec_rejects_zero_db() {
         let cli = cli_with(&["exec", "DELETE FROM t"]);
-        let err = run_exec(&cli, "DELETE FROM t", false).unwrap_err();
+        let err = run_exec(&cli, Some("DELETE FROM t"), None, false, false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("requires exactly one --db"),
@@ -440,7 +579,7 @@ mod tests {
     #[test]
     fn exec_rejects_multiple_dbs() {
         let cli = cli_with(&["--db", "a", "--db", "b", "exec", "DELETE FROM t"]);
-        let err = run_exec(&cli, "DELETE FROM t", false).unwrap_err();
+        let err = run_exec(&cli, Some("DELETE FROM t"), None, false, false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("only one --db"),
@@ -450,16 +589,83 @@ mod tests {
 
     #[test]
     fn exec_yes_flag_parses() {
-        // Confirms the flag is wired through clap; behavior is verified via run_exec
-        // (here we just need a Cli that parses cleanly with --yes).
         let cli = cli_with(&["--db", "a", "exec", "--yes", "DELETE FROM t"]);
-        // Sanity: still reaches our validation (will fail later trying to load the
-        // config file, since 'a' isn't real — but that proves we passed --yes parsing).
-        let err = run_exec(&cli, "DELETE FROM t", true).unwrap_err();
+        let err = run_exec(&cli, Some("DELETE FROM t"), None, false, true).unwrap_err();
         let msg = err.to_string();
         assert!(
             !msg.contains("requires exactly one --db") && !msg.contains("--all"),
             "selection rules should pass with one --db; got: {msg}"
         );
+    }
+
+    #[test]
+    fn exec_rejects_both_inline_sql_and_file() {
+        let cli = cli_with(&["--db", "a", "exec", "DELETE FROM t"]);
+        let err = run_exec(
+            &cli,
+            Some("DELETE FROM t"),
+            Some("/tmp/x.sql"),
+            false,
+            false,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not both"),
+            "expected mutual-exclusion error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_rejects_neither_inline_sql_nor_file() {
+        let cli = cli_with(&["--db", "a", "exec", ""]);
+        let err = run_exec(&cli, None, None, false, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("provide SQL inline or via `--file`") || msg.contains("--file"),
+            "expected missing-input error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_rejects_transaction_flag_without_file() {
+        let cli = cli_with(&["--db", "a", "exec", "DELETE FROM t"]);
+        let err = run_exec(&cli, Some("DELETE FROM t"), None, true, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--transaction"),
+            "expected --transaction rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_file_arg_parses_via_clap() {
+        // `requires = "file"` and `conflicts_with = "sql"` on the clap attrs
+        // are exercised here — this only checks the parser accepts the form.
+        let cli = cli_with(&[
+            "--db",
+            "a",
+            "exec",
+            "--file",
+            "/tmp/seed.sql",
+            "--transaction",
+            "--yes",
+        ]);
+        // Pull the parsed fields out and assert; we don't run anything that
+        // would need a real file.
+        match cli.command {
+            Some(crate::args::Commands::Exec {
+                sql,
+                file,
+                transaction,
+                yes,
+            }) => {
+                assert!(sql.is_none());
+                assert_eq!(file.as_deref(), Some("/tmp/seed.sql"));
+                assert!(transaction);
+                assert!(yes);
+            }
+            _ => panic!("expected Exec subcommand"),
+        }
     }
 }

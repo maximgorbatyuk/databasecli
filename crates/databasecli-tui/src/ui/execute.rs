@@ -45,7 +45,7 @@ pub fn draw_execute(frame: &mut Frame, app: &AppState, area: ratatui::layout::Re
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        footer_for(app.execute_phase),
+        footer_for(app.execute_phase, app.execute_input_mode),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -89,37 +89,117 @@ fn draw_picker(lines: &mut Vec<Line>, app: &AppState) {
 }
 
 fn draw_editor(lines: &mut Vec<Line>, app: &AppState) {
-    let cursor = if app.execute_input_mode { "_" } else { "" };
+    // Mode pill: gives an at-a-glance signal of where the next keystroke
+    // lands. Without it, a user re-entering input mode on a populated
+    // buffer has no obvious indication that typing now appends to the
+    // buffer instead of scrolling.
+    let (mode_label, mode_color) = if app.execute_input_mode {
+        ("● TYPING", Color::Green)
+    } else {
+        ("○ scroll", Color::DarkGray)
+    };
     lines.push(Line::from(vec![
-        Span::styled("  SQL> ", Style::default().fg(Color::Yellow)),
+        Span::styled("  ", Style::default()),
         Span::styled(
-            format!("{}{}", app.execute_sql_buffer, cursor),
-            Style::default().fg(Color::White),
+            mode_label,
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  SQL (Enter inserts newline, F5 or Ctrl+R run):",
+            Style::default().fg(Color::Yellow),
         ),
     ]));
+    lines.push(Line::from(""));
+
+    if app.execute_sql_buffer.is_empty() {
+        if app.execute_input_mode {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    "▌",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  (start typing or paste here)",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  (empty — press `i` to start typing or paste here)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        return;
+    }
+
+    let buffer_lines: Vec<&str> = app.execute_sql_buffer.split('\n').collect();
+    let last_idx = buffer_lines.len().saturating_sub(1);
+    for (idx, line) in buffer_lines.iter().enumerate() {
+        if idx == last_idx && app.execute_input_mode {
+            // Render the cursor as a bold green block (▌) on its own span
+            // so it stands out from the surrounding white text. Using a
+            // distinct color is more reliable than a blink modifier, which
+            // many terminals ignore.
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {line}"), Style::default().fg(Color::White)),
+                Span::styled(
+                    "▌",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
 }
 
 fn draw_confirm(lines: &mut Vec<Line>, app: &AppState) {
-    let kind = app
-        .execute_pending_kind
-        .map(|k| format!("{k:?}").to_uppercase())
-        .unwrap_or_else(|| "STATEMENT".to_string());
     let db = app
         .execute_database
         .clone()
         .unwrap_or_else(|| "<none>".to_string());
 
+    let n = app.execute_destructive_items.len();
+    let heading = if n == 1 {
+        format!("  About to run a destructive statement on {db}:")
+    } else {
+        format!("  About to run {n} destructive statements on {db}:")
+    };
     lines.push(Line::from(Span::styled(
-        format!("  About to run a {kind} statement on {db}:"),
+        heading,
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("    {}", app.execute_sql_buffer.trim()),
-        Style::default().fg(Color::White),
-    )));
+
+    for item in &app.execute_destructive_items {
+        lines.push(Line::from(Span::styled(
+            item.clone(),
+            Style::default().fg(Color::White),
+        )));
+    }
+
+    let total = app.execute_pending_statements.len();
+    if total > n {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  ({} more non-destructive statement(s) will also run.)",
+                total - n
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  This will modify the database. Proceed? [y/N]",
@@ -137,27 +217,58 @@ fn draw_result(lines: &mut Vec<Line>, app: &AppState) {
         return;
     }
 
-    let Some(ref result) = app.execute_result else {
+    if app.execute_results.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no result yet)",
             Style::default().fg(Color::DarkGray),
         )));
         return;
-    };
+    }
 
-    let formatted = format_execute_result(result);
-    for line in formatted.lines() {
+    let total = app.execute_results.len();
+    lines.push(Line::from(Span::styled(
+        format!("  Ran {total} statement(s):"),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    for (idx, result) in app.execute_results.iter().enumerate() {
+        let line_no = app
+            .execute_pending_statements
+            .get(idx)
+            .map(|s| s.start_line);
+        let header = match line_no {
+            Some(n) if n > 0 => format!("  -- line {n}: {}", result.command_tag),
+            _ => format!("  -- {}", result.command_tag),
+        };
         lines.push(Line::from(Span::styled(
-            format!("  {line}"),
-            Style::default().fg(Color::Green),
+            header,
+            Style::default().fg(Color::Cyan),
         )));
+        for body_line in format_execute_result(result).lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {body_line}"),
+                Style::default().fg(Color::Green),
+            )));
+        }
+        if idx + 1 < total {
+            lines.push(Line::from(""));
+        }
     }
 }
 
-fn footer_for(phase: ExecutePhase) -> &'static str {
+fn footer_for(phase: ExecutePhase, input_mode: bool) -> &'static str {
     match phase {
         ExecutePhase::PickDatabase => "  j/k navigate  Enter pick  Esc back  q quit",
-        ExecutePhase::EditSql => "  i/Enter type  Enter run  Esc stop typing  q quit",
+        ExecutePhase::EditSql => {
+            if input_mode {
+                "  F5/Ctrl+R run  Enter newline  Backspace delete  Esc stop typing"
+            } else {
+                "  i/Enter type  F5/Ctrl+R run  c clear  j/k scroll  Esc back  q quit"
+            }
+        }
         ExecutePhase::Confirm => "  y confirm  n/Esc cancel  q quit",
         ExecutePhase::Result => "  Esc back  q quit",
     }

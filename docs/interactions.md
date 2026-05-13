@@ -10,7 +10,7 @@ This repo has three kinds of external interactions: synchronous PostgreSQL calls
 |------|--------|---------|
 | `postgres::Client::connect` (TLS via `postgres-native-tls`) | [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs), [`crates/databasecli-core/src/health.rs`](../crates/databasecli-core/src/health.rs) | Open a synchronous connection. Connect timeout is 5 seconds (encoded in the connection string built by `DatabaseConfig::connection_string`). |
 | `SET default_transaction_read_only = on; SET statement_timeout = '30s'` | `open_client(.., ConnectionMode::ReadOnly)` | Applied to every connection used by `ConnectionManager` (CLI/TUI read commands and all MCP tools). |
-| `SET statement_timeout = '30s'` | `connect_for_local_exec` | Applied to every short-lived writable connection used by the local `exec` path. |
+| `SET statement_timeout = '30s'` | `connect_for_local_exec` | Applied to every short-lived writable connection used by the local `exec` path. Inline `exec` uses one connection per statement; `exec --file` uses one connection per script invocation so BEGIN/COMMIT/SAVEPOINT work as written. |
 | `Client::query`, `Client::execute`, `Client::prepare`, `Client::simple_query` | command modules under [`crates/databasecli-core/src/commands/`](../crates/databasecli-core/src/commands) and [`crates/databasecli-core/src/health.rs`](../crates/databasecli-core/src/health.rs) | Read SQL, write SQL (RETURNING vs non-RETURNING), and the per-database `SELECT 1` heartbeat used by `check_health`. |
 
 TLS uses `native_tls::TlsConnector::builder().danger_accept_invalid_certs(true)`. Connections are encrypted but not CA-verified — see [`./gotchas.md`](./gotchas.md).
@@ -36,6 +36,10 @@ PostgreSQL is the only external runtime dependency. There are no HTTP clients, n
 Adding a new tool means: (1) declare it on `DatabaseCliServer` with `#[tool(...)]`, (2) implement the wrapper in `tools/<area>.rs`, (3) add the `fn` name to the `ALLOWED` list in [`crates/databasecli-mcp/tests/guard.rs`](../crates/databasecli-mcp/tests/guard.rs). The guard test will fail the build if step 3 is skipped.
 
 The MCP surface is strictly read-only. Writes are not exposed; the validator in [`crates/databasecli-core/src/commands/query.rs`](../crates/databasecli-core/src/commands/query.rs) (`validate_readonly`) plus the database-level read-only transaction setting plus the guard tests in [`crates/databasecli-mcp/tests/guard.rs`](../crates/databasecli-mcp/tests/guard.rs) form three independent layers. Full security model: [`./mcp.md`](./mcp.md).
+
+## Filesystem reads — `exec --file`
+
+`databasecli exec --db <name> --file <PATH>` reads `PATH` via `std::fs::read_to_string` once at the start of the run. The file is parsed by `split_script` into single statements (string-literal and comment aware; dollar-quoted bodies rejected up front), and every statement runs on the same short-lived writable connection. The read is a one-shot synchronous operation — there is no streaming, no inotify-style watch, and no temp file fan-out. The TUI Execute screen performs no filesystem read of its own; instead, terminal bracketed paste delivers script content via `Event::Paste(String)` and the buffer is split the same way.
 
 ## Filesystem writes — `init`
 

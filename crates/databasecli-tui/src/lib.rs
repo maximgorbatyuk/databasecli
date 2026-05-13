@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self as ct_event, Event};
+use crossterm::event::{self as ct_event, DisableBracketedPaste, EnableBracketedPaste, Event};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use databasecli_core::commands::analyze::analyze_table;
 use databasecli_core::commands::compare::compare_query;
 use databasecli_core::commands::erd::build_erd;
-use databasecli_core::commands::execute::{ExecuteResult, execute_statement};
+use databasecli_core::commands::execute::{ExecuteResult, execute_script};
 use databasecli_core::commands::query::execute_query;
 use databasecli_core::commands::sample::sample_table;
 use databasecli_core::commands::schema::dump_schema;
@@ -38,14 +38,23 @@ use app::{AppAction, AppState};
 pub fn run(directory: Option<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Bracketed paste lets terminals deliver pasted text as a single
+    // Event::Paste(String) instead of one KeyCode::Char per character. The
+    // Execute screen needs this so a pasted multi-statement seed lands
+    // verbatim — newlines, semicolons, and all — without each character
+    // racing through the per-screen key router.
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_loop(&mut terminal, directory);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -65,7 +74,7 @@ enum BackgroundResult {
     Erd(Result<databasecli_core::commands::erd::ErdResult, String>),
     Compare(Result<databasecli_core::commands::compare::CompareResult, String>),
     Trend(Result<databasecli_core::commands::trend::TrendResult, String>),
-    Execute(Result<ExecuteResult, String>),
+    Execute(Result<Vec<ExecuteResult>, String>),
 }
 
 fn run_loop(
@@ -88,10 +97,12 @@ fn run_loop(
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
-        if ct_event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = ct_event::read()?
-        {
-            event::handle_key(&mut app, key);
+        if ct_event::poll(Duration::from_millis(100))? {
+            match ct_event::read()? {
+                Event::Key(key) => event::handle_key(&mut app, key),
+                Event::Paste(text) => app.execute_append_paste(&text),
+                _ => {}
+            }
         }
 
         if app.is_loading || bg_rx.is_some() {
@@ -252,15 +263,21 @@ fn run_loop(
                         }
                     });
                 }
-                AppAction::ExecuteStatement { database, sql } => {
+                AppAction::ExecuteScript {
+                    database,
+                    statements,
+                } => {
                     let directory_for_bg = app.directory.clone();
                     let (tx, rx) = mpsc::channel();
                     bg_rx = Some(rx);
-                    // NOTE: Execute opens its own short-lived writable connection. It
-                    // does NOT mutate through the read-only sessions held by
-                    // ConnectionManager, and it is intentionally not surfaced via MCP.
+                    // NOTE: Execute opens its own short-lived writable connection.
+                    // It does NOT mutate through the read-only sessions held by
+                    // ConnectionManager, and it is intentionally not surfaced via
+                    // MCP. The connection lives for the duration of one script run
+                    // so BEGIN/COMMIT/SAVEPOINT in the operator's SQL work as
+                    // written.
                     thread::spawn(move || {
-                        let outcome = (|| -> Result<ExecuteResult, String> {
+                        let outcome = (|| -> Result<Vec<ExecuteResult>, String> {
                             let path = resolve_config_path_with_base(directory_for_bg.as_deref())
                                 .map_err(|e| e.to_string())?;
                             let configs = load_databases(&path).map_err(|e| e.to_string())?;
@@ -270,7 +287,7 @@ fn run_loop(
                                 })?;
                             let mut conn =
                                 connect_for_local_exec(config).map_err(|e| e.to_string())?;
-                            execute_statement(&mut conn, &sql).map_err(|e| e.to_string())
+                            execute_script(&mut conn, &statements).map_err(|e| e.to_string())
                         })();
                         let _ = tx.send(BackgroundResult::Execute(outcome));
                     });

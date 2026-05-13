@@ -68,7 +68,10 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) {
         Screen::Query | Screen::Sample | Screen::Analyze | Screen::Compare | Screen::Trend => {
             input::handle_input_screen(app, code)
         }
-        Screen::Execute => execute::handle_execute(app, code),
+        // Execute is the only screen that needs modifier-aware dispatch
+        // (Ctrl+R is a fallback run key for terminals that don't forward F5).
+        // Pass the full event so the Execute handler can read modifiers.
+        Screen::Execute => execute::handle_execute(app, code, key.modifiers),
     }
 }
 

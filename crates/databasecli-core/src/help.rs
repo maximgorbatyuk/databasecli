@@ -56,7 +56,14 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                 HelpItem {
                     name: "databasecli exec --db <name> [--yes] <sql>".to_string(),
                     description:
-                        "Local-only write/DDL execution on one database. Prompts before destructive statements. Not exposed via MCP."
+                        "Local-only write/DDL on one database. Inline form runs a single statement (or a WITH ... INSERT|UPDATE|DELETE chain). Prompts before destructive statements; --yes bypasses. Not exposed via MCP."
+                            .to_string(),
+                },
+                HelpItem {
+                    name: "databasecli exec --db <name> --file <PATH> [--transaction] [--yes]"
+                        .to_string(),
+                    description:
+                        "Run a multi-statement SQL script (seeds, migrations) on one database. Supports BEGIN/COMMIT/SAVEPOINT/SET and WITH ... DML chains. --transaction wraps the whole file in an injected BEGIN/COMMIT pair if your script doesn't manage transactions itself. Destructive statements are listed once with line numbers before running. Not exposed via MCP."
                             .to_string(),
                 },
                 HelpItem {
@@ -233,12 +240,16 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                     description: "Only SELECT, WITH, EXPLAIN, SHOW, TABLE allowed. Semicolons blocked.".to_string(),
                 },
                 HelpItem {
-                    name: "exec scope (v1)".to_string(),
-                    description: "Single statement; optional trailing `;`; no WITH; no procedural bodies (DO $$ ... $$). Destructive statements (UPDATE/DELETE/DROP/TRUNCATE/ALTER) prompt unless --yes.".to_string(),
+                    name: "exec scope (inline)".to_string(),
+                    description: "One statement per call. WITH ... <INSERT|UPDATE|DELETE> chains accepted; classified by the most severe verb across all CTE bodies and the outer DML. Procedural bodies (DO $$ ... $$, function definitions) and dollar-quoted strings are rejected. COPY rejected. Destructive verbs (UPDATE/DELETE/DROP/TRUNCATE/ALTER/MERGE) prompt unless --yes.".to_string(),
+                },
+                HelpItem {
+                    name: "exec scope (--file)".to_string(),
+                    description: "Multi-statement scripts split by unquoted `;`. BEGIN/COMMIT/ROLLBACK/SAVEPOINT/SET accepted as their own statements. Destructive scan is global: one prompt lists every destructive statement with line numbers. --transaction wraps the whole script in an injected BEGIN/COMMIT pair when the file doesn't manage transactions itself. Procedural bodies still rejected.".to_string(),
                 },
                 HelpItem {
                     name: "exec connection".to_string(),
-                    description: "Short-lived writable connection per call; not held in the read-only ConnectionManager; never reachable from MCP.".to_string(),
+                    description: "Short-lived writable connection per invocation. Inline runs use one connection for one statement; --file uses one connection for the entire script so BEGIN/COMMIT/SAVEPOINT work as written. Never held in the read-only ConnectionManager; never reachable from MCP.".to_string(),
                 },
                 HelpItem {
                     name: "Passwords".to_string(),

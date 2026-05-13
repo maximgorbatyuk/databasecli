@@ -9,11 +9,11 @@ use crate::error::DatabaseCliError;
 pub enum StatementKind {
     /// Read-only SQL — `exec` rejects these and points to `query`.
     Read,
-    /// Non-destructive write (INSERT, CREATE, GRANT, VACUUM, etc.). Runs without confirmation.
+    /// Non-destructive write (INSERT, CREATE, GRANT, VACUUM, BEGIN, SET, ...). Runs without confirmation.
     Write,
-    /// Destructive write (UPDATE, DELETE, DROP, TRUNCATE, ALTER). Requires confirmation.
+    /// Destructive write (UPDATE, DELETE, DROP, TRUNCATE, ALTER, or a WITH chain that contains any of those at top level). Requires confirmation.
     Destructive,
-    /// Disallowed by `exec` v1 (e.g. `WITH`, unknown verb, procedural body).
+    /// Disallowed by `exec` v1 (unknown verb, procedural body, WITH chain with no resolvable DML).
     Unsupported,
 }
 
@@ -25,6 +25,24 @@ impl StatementKind {
     pub fn requires_confirmation(self) -> bool {
         self.is_destructive()
     }
+
+    /// Order kinds by severity for "most severe wins" merging across CTE bodies.
+    fn severity(self) -> u8 {
+        match self {
+            StatementKind::Unsupported => 0,
+            StatementKind::Read => 1,
+            StatementKind::Write => 2,
+            StatementKind::Destructive => 3,
+        }
+    }
+
+    fn merge(self, other: StatementKind) -> StatementKind {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Output of validating a single `exec` statement.
@@ -33,15 +51,26 @@ impl StatementKind {
 /// transformations applied — surrounding whitespace trimmed and at most one
 /// trailing semicolon removed. Inline comments and token adjacency are
 /// preserved so PostgreSQL parses exactly what the operator typed, not a
-/// rewritten copy. `first_keyword` and `has_returning` are derived from a
-/// separate comment-stripped analysis copy and used for classification only.
+/// rewritten copy. `first_keyword`, `effective_verb`, `kind`, and
+/// `has_returning` are derived from a separate comment-stripped analysis copy
+/// and used for classification only.
 #[derive(Debug, Clone)]
 pub struct NormalizedStatement {
     /// Executable SQL — derived from the operator's original input.
     pub sql: String,
-    /// First SQL keyword in upper case (e.g. "INSERT", "DROP"), extracted
-    /// from the comment-stripped analysis copy.
+    /// Literal first SQL keyword in upper case (e.g. "INSERT", "WITH", "DROP"),
+    /// extracted from the comment-stripped analysis copy. Used for human-facing
+    /// messages; do **not** classify on this field directly because a leading
+    /// `WITH` hides the real DML verb.
     pub first_keyword: String,
+    /// Verb that drives execution semantics (RETURNING handling, command tag).
+    /// Equals `first_keyword` for non-WITH statements. For a `WITH ... DML`
+    /// chain this is the outer DML verb (the one PostgreSQL uses for the
+    /// command tag).
+    pub effective_verb: String,
+    /// Resolved classification. For `WITH` this is the *most severe* DML kind
+    /// found at top level across every CTE body and the final clause.
+    pub kind: StatementKind,
     /// True when the statement contains a top-level `RETURNING` clause
     /// (computed on the analysis copy so an inline comment like
     /// `INSERT /* RETURNING */ INTO t VALUES (1)` is correctly seen as a
@@ -50,13 +79,23 @@ pub struct NormalizedStatement {
 }
 
 impl NormalizedStatement {
-    /// Classify this statement's leading verb. Pure function over `first_keyword`.
+    /// Return the resolved classification. Pure accessor; classification is
+    /// computed once during validation.
     pub fn kind(&self) -> StatementKind {
-        classify_keyword(&self.first_keyword)
+        self.kind
     }
 }
 
-/// Result of executing one statement via `execute_statement`.
+/// One statement extracted from a multi-statement script, with its 1-based
+/// starting line number for error context.
+#[derive(Debug, Clone)]
+pub struct ScriptStatement {
+    pub statement: NormalizedStatement,
+    pub start_line: usize,
+}
+
+/// Result of executing one statement via `execute_statement` or
+/// `execute_script`.
 #[derive(Debug, Clone)]
 pub struct ExecuteResult {
     pub database_name: String,
@@ -78,7 +117,9 @@ pub struct ExecuteResult {
 /// - multiple top-level statements (any unquoted `;` other than a single trailing one),
 /// - dollar-quoted strings (`$$ ... $$`, `$tag$ ... $tag$`) and `DO` blocks,
 /// - unterminated block comments (`/*` without a matching `*/`),
-/// - input whose first keyword cannot be extracted.
+/// - input whose first keyword cannot be extracted,
+/// - `WITH ... <SELECT only>` chains (use `query` for those),
+/// - `WITH` chains where no top-level DML verb can be resolved.
 ///
 /// # Safety invariant — no rewriting of the executable text
 ///
@@ -100,9 +141,6 @@ pub struct ExecuteResult {
 /// no write is ever silently smuggled through. Rewrite affected statements
 /// using `''` doubling.
 pub fn validate_single_statement(sql: &str) -> Result<NormalizedStatement, DatabaseCliError> {
-    // Analysis copy: comments removed, block comments replaced with a single
-    // space so token boundaries (e.g. `INSERT/*x*/INTO`) are preserved.
-    // `?` propagates the error for unterminated block comments.
     let stripped = strip_sql_comments(sql)?;
     let analysis = stripped.trim();
 
@@ -117,12 +155,10 @@ pub fn validate_single_statement(sql: &str) -> Result<NormalizedStatement, Datab
         ));
     }
 
-    // Multi-statement check runs on the analysis copy. Allowed: zero
-    // semicolons, or exactly one that sits at the very end.
     let semis = count_unquoted_semicolons(analysis);
     if semis > 1 || (semis == 1 && !analysis.trim_end().ends_with(';')) {
         return Err(DatabaseCliError::UnsupportedExecStatement(
-            "multi-statement input is not allowed; submit one statement at a time".to_string(),
+            "multi-statement input is not allowed; submit one statement at a time or use `--file` for scripts".to_string(),
         ));
     }
 
@@ -144,6 +180,17 @@ pub fn validate_single_statement(sql: &str) -> Result<NormalizedStatement, Datab
 
     let has_returning = has_returning_clause(analysis);
 
+    // Resolve effective_verb and kind. For non-WITH the verb is the leading
+    // keyword. For WITH we scan the analysis copy for top-level DML verbs
+    // across every CTE body and pick the most severe for `kind`; the outer
+    // verb (the one after the last CTE) drives `effective_verb` so the
+    // command tag matches PostgreSQL's.
+    let (effective_verb, kind) = if first_keyword == "WITH" {
+        resolve_with_kind(analysis)?
+    } else {
+        (first_keyword.clone(), classify_keyword(&first_keyword))
+    };
+
     // Build executable SQL from the ORIGINAL input. Permitted transformations:
     // trim surrounding whitespace, remove a single trailing semicolon. We never
     // rewrite the body — inline comments and token adjacency are preserved so
@@ -162,14 +209,15 @@ pub fn validate_single_statement(sql: &str) -> Result<NormalizedStatement, Datab
     Ok(NormalizedStatement {
         sql: executable,
         first_keyword,
+        effective_verb,
+        kind,
         has_returning,
     })
 }
 
 /// Classify the leading verb of `sql` for the `exec` path.
 ///
-/// Returns `Unsupported` for anything `validate_single_statement` rejects, for `WITH`
-/// (because writable CTEs cannot be classified safely), and for any unrecognized verb.
+/// Convenience wrapper that maps any validation failure to `Unsupported`.
 pub fn classify_statement(sql: &str) -> StatementKind {
     match validate_single_statement(sql) {
         Ok(n) => n.kind(),
@@ -186,12 +234,19 @@ pub fn classify_statement(sql: &str) -> StatementKind {
 /// `Client::query`). Treating `COPY` as a regular write would either silently
 /// drop the data stream or produce a confusing protocol error, so v1 rejects
 /// it as `Unsupported`.
+///
+/// Transaction-control verbs (`BEGIN`, `COMMIT`, `ROLLBACK`, `START`, `END`,
+/// `SAVEPOINT`, `RELEASE`, `SET`) are classified as `Write` (non-destructive,
+/// no confirmation prompt) so multi-statement scripts can group operations in
+/// an explicit transaction.
 pub fn classify_keyword(kw: &str) -> StatementKind {
     match kw {
-        "SELECT" | "SHOW" | "EXPLAIN" | "TABLE" => StatementKind::Read,
+        "SELECT" | "SHOW" | "EXPLAIN" | "TABLE" | "VALUES" => StatementKind::Read,
         "INSERT" | "CREATE" | "GRANT" | "REVOKE" | "VACUUM" | "ANALYZE" | "REINDEX" | "COMMENT"
-        | "REFRESH" | "CLUSTER" => StatementKind::Write,
-        "UPDATE" | "DELETE" | "DROP" | "TRUNCATE" | "ALTER" => StatementKind::Destructive,
+        | "REFRESH" | "CLUSTER" | "BEGIN" | "COMMIT" | "ROLLBACK" | "START" | "END"
+        | "SAVEPOINT" | "RELEASE" | "SET" | "RESET" | "LOCK" | "LISTEN" | "UNLISTEN" | "NOTIFY"
+        | "DECLARE" | "FETCH" | "CLOSE" | "MOVE" | "CHECKPOINT" => StatementKind::Write,
+        "UPDATE" | "DELETE" | "DROP" | "TRUNCATE" | "ALTER" | "MERGE" => StatementKind::Destructive,
         _ => StatementKind::Unsupported,
     }
 }
@@ -238,9 +293,7 @@ pub fn execute_normalized(
     }
 
     let start = Instant::now();
-    // Use the cached has_returning computed from the analysis copy. Reading
-    // it off the original `stmt.sql` would mis-detect inputs like
-    // `INSERT /* RETURNING */ INTO t VALUES (1)`.
+    let verb = stmt.effective_verb.as_str();
     let mut result = if stmt.has_returning {
         // Prepare first so we can capture column metadata even when the
         // statement returns zero rows (e.g. ON CONFLICT DO NOTHING RETURNING).
@@ -260,7 +313,7 @@ pub fn execute_normalized(
             })
             .collect();
         let affected = data.len() as u64;
-        let tag = format!("{} {affected}", stmt.first_keyword);
+        let tag = format!("{verb} {affected}");
         ExecuteResult {
             database_name: conn.config.name.clone(),
             command_tag: tag,
@@ -271,11 +324,11 @@ pub fn execute_normalized(
         }
     } else {
         let affected = conn.client.execute(stmt.sql.as_str(), &[])?;
-        let row_count_meaningful = is_row_count_meaningful(&stmt.first_keyword);
+        let row_count_meaningful = is_row_count_meaningful(verb);
         let tag = if row_count_meaningful {
-            format!("{} {affected}", stmt.first_keyword)
+            format!("{verb} {affected}")
         } else {
-            stmt.first_keyword.clone()
+            verb.to_string()
         };
         ExecuteResult {
             database_name: conn.config.name.clone(),
@@ -291,13 +344,294 @@ pub fn execute_normalized(
     Ok(result)
 }
 
-/// True when the postgres command-tag row count for `first_keyword` carries
+/// Local CLI/TUI execution only. Do NOT expose through databasecli-mcp.
+///
+/// Run a pre-validated list of statements against a single writable connection
+/// in submission order. Stops at the first failure and returns the error
+/// annotated with the source line number of the offending statement so the
+/// operator can find it in the script. Statements executed before the
+/// failure stay committed unless the script itself wraps them in a
+/// transaction (BEGIN/COMMIT).
+pub fn execute_script(
+    conn: &mut LiveConnection,
+    statements: &[ScriptStatement],
+) -> Result<Vec<ExecuteResult>, DatabaseCliError> {
+    let mut results = Vec::with_capacity(statements.len());
+    for entry in statements {
+        match execute_normalized(conn, &entry.statement) {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                // Re-wrap with line context. Injected BEGIN/COMMIT (start_line=0)
+                // skip the annotation so the user isn't pointed at a synthetic
+                // line they didn't write.
+                if entry.start_line == 0 {
+                    return Err(e);
+                }
+                let msg = format!("line {}: {e}", entry.start_line);
+                return Err(DatabaseCliError::QueryFailed(msg));
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Split a multi-statement SQL script into validated single statements.
+///
+/// The splitter is comment-aware and string-literal-aware. It rejects
+/// dollar-quoted bodies up front (consistent with `exec` v1's ban on
+/// procedural bodies). Each resulting chunk is run through
+/// [`validate_single_statement`]; the error context includes the 1-based line
+/// number where the offending chunk starts.
+pub fn split_script(script: &str) -> Result<Vec<ScriptStatement>, DatabaseCliError> {
+    if contains_dollar_quote(script) {
+        return Err(DatabaseCliError::UnsupportedExecStatement(
+            "dollar-quoted bodies (e.g. DO $$ ... $$, function definitions) are not allowed"
+                .to_string(),
+        ));
+    }
+
+    let mut out = Vec::new();
+    let bytes = script.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut chunk_start = 0;
+
+    while i < len {
+        let b = bytes[i];
+        match b {
+            b'\'' => {
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\'' {
+                        if i + 1 < len && bytes[i + 1] == b'\'' {
+                            i += 2;
+                        } else {
+                            i += 1;
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'-' if i + 1 < len && bytes[i + 1] == b'-' => {
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                let comment_open = i;
+                i += 2;
+                let mut depth: usize = 1;
+                while i < len && depth > 0 {
+                    if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if depth > 0 {
+                    return Err(DatabaseCliError::UnsupportedExecStatement(format!(
+                        "line {}: unterminated block comment (`/*` without matching `*/`)",
+                        line_of(script, comment_open)
+                    )));
+                }
+            }
+            b';' => {
+                push_chunk_if_nonempty(&mut out, script, chunk_start, i)?;
+                i += 1;
+                chunk_start = i;
+            }
+            _ => i += 1,
+        }
+    }
+
+    if chunk_start < len {
+        push_chunk_if_nonempty(&mut out, script, chunk_start, len)?;
+    }
+
+    if out.is_empty() {
+        return Err(DatabaseCliError::EmptyQuery);
+    }
+
+    Ok(out)
+}
+
+/// 1-based line number containing the byte at `byte_offset`. Treats EOF as
+/// belonging to the last line.
+fn line_of(src: &str, byte_offset: usize) -> usize {
+    let upper = byte_offset.min(src.len());
+    1 + src.as_bytes()[..upper]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+}
+
+fn push_chunk_if_nonempty(
+    out: &mut Vec<ScriptStatement>,
+    script: &str,
+    chunk_start: usize,
+    chunk_end: usize,
+) -> Result<(), DatabaseCliError> {
+    let chunk = &script[chunk_start..chunk_end];
+    let leading_ws: usize = chunk
+        .bytes()
+        .take_while(|b| b.is_ascii_whitespace())
+        .count();
+    if chunk_start + leading_ws >= chunk_end {
+        return Ok(());
+    }
+    let start_line = line_of(script, chunk_start + leading_ws);
+    match validate_single_statement(chunk) {
+        Ok(statement) => {
+            out.push(ScriptStatement {
+                statement,
+                start_line,
+            });
+            Ok(())
+        }
+        // A chunk that becomes empty after comment-stripping (e.g. `;-- end\n`
+        // or a stray `;` between two comments) is silently skipped to match
+        // `psql -f` behaviour. The whole-script empty case is still caught by
+        // the `out.is_empty()` check in `split_script`.
+        Err(DatabaseCliError::EmptyQuery) => Ok(()),
+        Err(DatabaseCliError::UnsupportedExecStatement(msg)) => Err(
+            DatabaseCliError::UnsupportedExecStatement(format!("line {start_line}: {msg}")),
+        ),
+        Err(other) => Err(other),
+    }
+}
+
+/// Resolve `(effective_verb, kind)` for a statement whose first keyword is
+/// `WITH`.
+///
+/// Walks the comment-stripped analysis copy and collects:
+///   * **CTE body verbs** — classified keywords that appear at paren depth 1
+///     immediately after `(`. Each captures the verb that drives one CTE body
+///     (e.g. `INSERT`, `DELETE`, `SELECT`).
+///   * **Outer verb** — the *first* classified keyword found at depth 0 after
+///     we've descended into at least one CTE body. This is the verb after the
+///     final closing `)` of the CTE list; any later depth-0 tokens (e.g. the
+///     `SELECT` inside `INSERT INTO t (cols) SELECT ...`) are part of the
+///     outer statement's body and are ignored.
+///
+/// `kind` is the most severe classification across the CTE-body verbs and the
+/// outer verb. `effective_verb` is the outer verb, which drives the command
+/// tag and matches what PostgreSQL itself reports.
+fn resolve_with_kind(analysis: &str) -> Result<(String, StatementKind), DatabaseCliError> {
+    let bytes = analysis.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut depth: i32 = 0;
+    let mut descended = false;
+    let mut cte_verbs: Vec<String> = Vec::new();
+    let mut outer_verb: Option<String> = None;
+
+    while i < len {
+        let b = bytes[i];
+        match b {
+            b'\'' => {
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\'' {
+                        if i + 1 < len && bytes[i + 1] == b'\'' {
+                            i += 2;
+                        } else {
+                            i += 1;
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'(' => {
+                depth += 1;
+                descended = true;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+            }
+            b if b.is_ascii_alphabetic() || b == b'_' => {
+                let start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let upper = analysis[start..i].to_ascii_uppercase();
+                if classify_keyword(&upper) == StatementKind::Unsupported {
+                    continue;
+                }
+                if depth >= 1 && prev_non_ws_is(bytes, start, b'(') {
+                    // Any classified verb whose token immediately follows `(`
+                    // (at any depth >= 1) is treated as a CTE-body verb for
+                    // severity purposes. This intentionally over-captures
+                    // verbs in nested CTEs and parenthesised subqueries:
+                    // `WITH outer AS (WITH inner AS (DELETE ...) SELECT ...) INSERT ...`
+                    // must still resolve to `Destructive` even though the
+                    // inner DELETE sits at depth 2.
+                    cte_verbs.push(upper);
+                } else if depth == 0 && descended && outer_verb.is_none() {
+                    // The outer verb sits right after the final `)` of the
+                    // CTE list. We don't require an exact prev-char match
+                    // here — anything at depth 0 after our first descent is
+                    // by construction outside the CTE list.
+                    outer_verb = Some(upper);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    let outer = outer_verb.ok_or_else(|| {
+        DatabaseCliError::UnsupportedExecStatement(
+            "WITH chain has no resolvable outer DML statement".to_string(),
+        )
+    })?;
+
+    let mut kind = classify_keyword(&outer);
+    for verb in &cte_verbs {
+        kind = kind.merge(classify_keyword(verb));
+    }
+
+    if kind == StatementKind::Unsupported {
+        return Err(DatabaseCliError::UnsupportedExecStatement(format!(
+            "WITH chain's top-level verb `{outer}` is not supported by `exec` v1"
+        )));
+    }
+
+    Ok((outer, kind))
+}
+
+/// True when the previous non-whitespace byte before `token_start` in `bytes`
+/// equals `expect`.
+///
+/// Walks left over ASCII whitespace one byte at a time. Worst case is O(n)
+/// per keyword scan; in practice the analysis copy is short (one statement,
+/// comments stripped) and the leading whitespace run before any token is
+/// bounded by source-level indentation. Safe to call on every classified
+/// token without changing the overall complexity of `resolve_with_kind`.
+fn prev_non_ws_is(bytes: &[u8], token_start: usize, expect: u8) -> bool {
+    let mut j = token_start;
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    if j == 0 {
+        return false;
+    }
+    bytes[j - 1] == expect
+}
+
+/// True when the postgres command-tag row count for `verb` carries
 /// useful information. DDL and maintenance verbs always report 0 rows, so we
-/// suppress the count to avoid the misleading "TRUNCATE 0", "VACUUM 0" tags.
-/// `COPY` is excluded because `exec` v1 rejects it before reaching this
-/// helper — listing it here would only confuse future readers.
-fn is_row_count_meaningful(first_keyword: &str) -> bool {
-    matches!(first_keyword, "INSERT" | "UPDATE" | "DELETE")
+/// suppress the count to avoid misleading "TRUNCATE 0", "VACUUM 0" tags.
+fn is_row_count_meaningful(verb: &str) -> bool {
+    matches!(verb, "INSERT" | "UPDATE" | "DELETE")
 }
 
 pub fn format_execute_result(result: &ExecuteResult) -> String {
@@ -361,8 +695,34 @@ pub fn format_execute_result(result: &ExecuteResult) -> String {
     }
 }
 
+/// Render a list of script results as one block per statement, separated by
+/// a blank line. Each block starts with a `--` header showing the source
+/// line and command tag, so a user can match a result to the chunk of the
+/// file it came from.
+pub fn format_script_results(statements: &[ScriptStatement], results: &[ExecuteResult]) -> String {
+    let mut out = String::new();
+    for (idx, result) in results.iter().enumerate() {
+        let line = statements
+            .get(idx)
+            .map(|s| s.start_line)
+            .unwrap_or_default();
+        out.push_str(&format!("-- line {line}: {}\n", result.command_tag));
+        out.push_str(&format_execute_result(result));
+        if idx + 1 < results.len() {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// True iff the analysis copy contains a `RETURNING` clause at paren depth 0.
+///
+/// Depth-aware so a RETURNING inside a CTE body (e.g.
+/// `WITH d AS (DELETE FROM t RETURNING id) INSERT INTO log SELECT ...`) does
+/// not trick the outer non-RETURNING INSERT into the prepare/query path.
 fn has_returning_clause(sql: &str) -> bool {
     let mut in_string = false;
+    let mut depth: i32 = 0;
     let bytes = sql.as_bytes();
     let needle = b"RETURNING";
     let mut i = 0;
@@ -377,7 +737,20 @@ fn has_returning_clause(sql: &str) -> bool {
             i += 1;
             continue;
         }
+        if !in_string {
+            if b == b'(' {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            if b == b')' {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+        }
         if !in_string
+            && depth == 0
             && i + needle.len() <= bytes.len()
             && bytes[i..i + needle.len()].eq_ignore_ascii_case(needle)
         {
@@ -448,7 +821,6 @@ fn contains_dollar_quote(sql: &str) -> bool {
             continue;
         }
         if !in_string && b == b'$' {
-            // Look for a matching closing $tag$ pattern. Tag is [A-Za-z_][A-Za-z0-9_]*.
             let mut j = i + 1;
             while j < len && is_dollar_tag_char(bytes[j], j == i + 1) {
                 j += 1;
@@ -491,14 +863,10 @@ fn strip_sql_comments(sql: &str) -> Result<String, DatabaseCliError> {
 
     while i < len {
         if i + 1 < len && chars[i] == '-' && chars[i + 1] == '-' {
-            // Line comment — skip to newline (or EOF). The newline (if any)
-            // is left in place to act as a token separator.
             while i < len && chars[i] != '\n' {
                 i += 1;
             }
         } else if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
-            // Block comment — emit a single space so adjacent tokens stay
-            // separate in the analysis copy.
             result.push(' ');
             i += 2;
             let mut depth: usize = 1;
@@ -519,8 +887,6 @@ fn strip_sql_comments(sql: &str) -> Result<String, DatabaseCliError> {
                 ));
             }
         } else if chars[i] == '\'' {
-            // String literal — preserved verbatim so dollar-quote and
-            // semicolon scans see the exact same characters PostgreSQL will.
             result.push(chars[i]);
             i += 1;
             while i < len {

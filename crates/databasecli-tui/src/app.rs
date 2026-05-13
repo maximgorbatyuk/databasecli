@@ -3,7 +3,9 @@ use std::fmt;
 use databasecli_core::commands::analyze::TableProfile;
 use databasecli_core::commands::compare::CompareResult;
 use databasecli_core::commands::erd::ErdResult;
-use databasecli_core::commands::execute::{ExecuteResult, StatementKind, classify_statement};
+use databasecli_core::commands::execute::{
+    ExecuteResult, ScriptStatement, StatementKind, split_script,
+};
 use databasecli_core::commands::query::QueryResultSet;
 use databasecli_core::commands::sample::SampleResult;
 use databasecli_core::commands::schema::SchemaResult;
@@ -149,7 +151,10 @@ pub enum AppAction {
     DisconnectDatabases(Vec<String>),
     RunSchema,
     RunQuery(String),
-    ExecuteStatement { database: String, sql: String },
+    ExecuteScript {
+        database: String,
+        statements: Vec<ScriptStatement>,
+    },
     RunSample(String),
     RunAnalyze(String),
     RunSummary,
@@ -199,14 +204,23 @@ pub struct AppState {
     pub compare_result: Option<CompareResult>,
     pub trend_result: Option<TrendResult>,
 
-    // Execute screen state — explicit phase machine instead of overloading input_mode/query_result
+    // Execute screen state — explicit phase machine instead of overloading input_mode/query_result.
+    // `execute_sql_buffer` is a multi-line buffer; bracketed paste appends
+    // verbatim and Enter inserts `\n`. F5 (or the equivalent run key) runs
+    // the buffer as a script through `split_script`.
     pub execute_phase: ExecutePhase,
     pub execute_db_cursor: usize,
     pub execute_database: Option<String>,
     pub execute_sql_buffer: String,
     pub execute_input_mode: bool,
-    pub execute_pending_kind: Option<StatementKind>,
-    pub execute_result: Option<ExecuteResult>,
+    /// Statements currently being prepared / executed. Populated after a
+    /// successful `split_script` and reused by the executor.
+    pub execute_pending_statements: Vec<ScriptStatement>,
+    /// Human-readable summary lines for every destructive statement in the
+    /// pending list, shown on the Confirm phase.
+    pub execute_destructive_items: Vec<String>,
+    /// Results from the last script run, in source order.
+    pub execute_results: Vec<ExecuteResult>,
 
     pending_action: Option<AppAction>,
 }
@@ -275,8 +289,9 @@ impl AppState {
             execute_database: None,
             execute_sql_buffer: String::new(),
             execute_input_mode: false,
-            execute_pending_kind: None,
-            execute_result: None,
+            execute_pending_statements: Vec::new(),
+            execute_destructive_items: Vec::new(),
+            execute_results: Vec::new(),
             pending_action: None,
         }
     }
@@ -577,8 +592,9 @@ impl AppState {
     fn enter_execute_screen(&mut self) {
         self.execute_sql_buffer.clear();
         self.execute_input_mode = false;
-        self.execute_pending_kind = None;
-        self.execute_result = None;
+        self.execute_pending_statements.clear();
+        self.execute_destructive_items.clear();
+        self.execute_results.clear();
         self.execute_db_cursor = 0;
 
         match self.connected_names.as_slice() {
@@ -619,36 +635,85 @@ impl AppState {
         }
     }
 
-    pub fn execute_submit_sql(&mut self) {
-        let sql = self.execute_sql_buffer.trim().to_string();
-        if sql.is_empty() {
+    /// Append `text` to the SQL buffer at the current insertion point.
+    /// Used by the bracketed-paste handler so a multi-line paste lands as a
+    /// single edit instead of one character per key event.
+    pub fn execute_append_paste(&mut self, text: &str) {
+        if !self.execute_input_mode || self.execute_phase != ExecutePhase::EditSql {
+            return;
+        }
+        self.execute_sql_buffer.push_str(text);
+    }
+
+    /// Run the buffer as a SQL script. Splits into statements via
+    /// `split_script`, rejects read-only / unsupported chunks with line
+    /// context, and either advances to Confirm (any destructive present) or
+    /// dispatches immediately.
+    pub fn execute_run(&mut self) {
+        let buffer = self.execute_sql_buffer.trim().to_string();
+        if buffer.is_empty() {
             return;
         }
         self.execute_input_mode = false;
         self.error_message = None;
+        self.execute_pending_statements.clear();
+        self.execute_destructive_items.clear();
 
-        let kind = classify_statement(&sql);
-        match kind {
-            StatementKind::Read => {
-                self.error_message =
-                    Some("Read-only SQL — use the Query screen instead.".to_string());
+        let statements = match split_script(&buffer) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error_message = Some(e.to_string());
                 self.execute_input_mode = true;
+                return;
             }
-            StatementKind::Unsupported => {
-                self.error_message = Some(
-                    "Statement not supported by Execute (no WITH, no procedural bodies, single statement only)."
-                        .to_string(),
-                );
-                self.execute_input_mode = true;
+        };
+
+        for entry in &statements {
+            match entry.statement.kind() {
+                StatementKind::Read => {
+                    self.error_message = Some(format!(
+                        "line {}: read-only SQL — use the Query screen for SELECT chains.",
+                        entry.start_line
+                    ));
+                    self.execute_input_mode = true;
+                    return;
+                }
+                StatementKind::Unsupported => {
+                    self.error_message = Some(format!(
+                        "line {}: `{}` is not supported by Execute (no procedural bodies, no dollar-quoted strings).",
+                        entry.start_line, entry.statement.first_keyword
+                    ));
+                    self.execute_input_mode = true;
+                    return;
+                }
+                StatementKind::Write | StatementKind::Destructive => {}
             }
-            StatementKind::Destructive => {
-                self.execute_pending_kind = Some(kind);
-                self.execute_phase = ExecutePhase::Confirm;
-            }
-            StatementKind::Write => {
-                self.execute_pending_kind = Some(kind);
-                self.dispatch_execute();
-            }
+        }
+
+        let destructive: Vec<String> = statements
+            .iter()
+            .filter(|s| s.statement.kind() == StatementKind::Destructive)
+            .map(|s| {
+                let verb = if s.statement.effective_verb == s.statement.first_keyword {
+                    s.statement.effective_verb.clone()
+                } else {
+                    format!(
+                        "{} → {}",
+                        s.statement.first_keyword, s.statement.effective_verb
+                    )
+                };
+                let sql_preview = truncate_for_display(&s.statement.sql, 100);
+                format!("  line {}: {verb} — {sql_preview}", s.start_line)
+            })
+            .collect();
+
+        self.execute_pending_statements = statements;
+        if destructive.is_empty() {
+            self.execute_destructive_items.clear();
+            self.dispatch_execute();
+        } else {
+            self.execute_destructive_items = destructive;
+            self.execute_phase = ExecutePhase::Confirm;
         }
     }
 
@@ -664,7 +729,8 @@ impl AppState {
             return;
         }
         self.execute_phase = ExecutePhase::EditSql;
-        self.execute_pending_kind = None;
+        self.execute_destructive_items.clear();
+        self.execute_pending_statements.clear();
         self.execute_input_mode = true;
     }
 
@@ -673,30 +739,43 @@ impl AppState {
             self.error_message = Some("No database selected.".to_string());
             return;
         };
-        let sql = self.execute_sql_buffer.trim().to_string();
-        if sql.is_empty() {
+        if self.execute_pending_statements.is_empty() {
             self.error_message = Some("SQL is empty.".to_string());
             return;
         }
         self.execute_phase = ExecutePhase::Result;
-        self.execute_result = None;
+        self.execute_results.clear();
         self.is_loading = true;
-        self.pending_action = Some(AppAction::ExecuteStatement { database, sql });
+        let statements = std::mem::take(&mut self.execute_pending_statements);
+        self.pending_action = Some(AppAction::ExecuteScript {
+            database,
+            statements,
+        });
     }
 
-    pub fn on_execute_completed(&mut self, result: ExecuteResult) {
-        self.execute_result = Some(result);
+    pub fn on_execute_completed(&mut self, results: Vec<ExecuteResult>) {
+        self.execute_results = results;
         self.execute_phase = ExecutePhase::Result;
         self.is_loading = false;
-        self.execute_pending_kind = None;
+        self.execute_destructive_items.clear();
     }
 
     pub fn on_execute_failed(&mut self, message: String) {
         self.error_message = Some(message);
         self.execute_phase = ExecutePhase::EditSql;
         self.execute_input_mode = true;
-        self.execute_pending_kind = None;
+        self.execute_destructive_items.clear();
         self.is_loading = false;
+    }
+}
+
+fn truncate_for_display(s: &str, max: usize) -> String {
+    let collapsed: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if collapsed.chars().count() <= max {
+        collapsed
+    } else {
+        let head: String = collapsed.chars().take(max).collect();
+        format!("{head}…")
     }
 }
 
@@ -748,9 +827,10 @@ mod tests {
     fn destructive_statement_enters_confirm_phase() {
         let mut app = app_with_connections(&["only"]);
         app.execute_sql_buffer = "DELETE FROM t".to_string();
-        app.execute_submit_sql();
+        app.execute_run();
         assert_eq!(app.execute_phase, ExecutePhase::Confirm);
-        assert_eq!(app.execute_pending_kind, Some(StatementKind::Destructive));
+        assert_eq!(app.execute_destructive_items.len(), 1);
+        assert!(app.execute_destructive_items[0].contains("DELETE"));
         assert!(app.pending_action.is_none(), "must wait for confirmation");
     }
 
@@ -758,30 +838,59 @@ mod tests {
     fn write_statement_dispatches_immediately() {
         let mut app = app_with_connections(&["only"]);
         app.execute_sql_buffer = "INSERT INTO t VALUES (1)".to_string();
-        app.execute_submit_sql();
+        app.execute_run();
         assert_eq!(app.execute_phase, ExecutePhase::Result);
         assert!(app.is_loading);
         match app.take_action() {
-            Some(AppAction::ExecuteStatement { database, sql }) => {
+            Some(AppAction::ExecuteScript {
+                database,
+                statements,
+            }) => {
                 assert_eq!(database, "only");
-                assert_eq!(sql, "INSERT INTO t VALUES (1)");
+                assert_eq!(statements.len(), 1);
+                assert_eq!(statements[0].statement.first_keyword, "INSERT");
             }
-            other => panic!("expected ExecuteStatement, got {other:?}"),
+            other => panic!("expected ExecuteScript, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multi_statement_buffer_runs_as_script() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer = "INSERT INTO a VALUES (1);\nINSERT INTO b VALUES (2);".to_string();
+        app.execute_run();
+        assert_eq!(app.execute_phase, ExecutePhase::Result);
+        assert!(app.is_loading);
+        match app.take_action() {
+            Some(AppAction::ExecuteScript { statements, .. }) => {
+                assert_eq!(statements.len(), 2);
+            }
+            other => panic!("expected ExecuteScript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_dml_chain_classified_as_write_dispatches() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_sql_buffer =
+            "WITH s AS (SELECT 1 AS id) INSERT INTO t SELECT id FROM s".to_string();
+        app.execute_run();
+        assert_eq!(app.execute_phase, ExecutePhase::Result);
+        assert!(app.is_loading);
     }
 
     #[test]
     fn read_statement_in_exec_is_rejected_with_error() {
         let mut app = app_with_connections(&["only"]);
         app.execute_sql_buffer = "SELECT 1".to_string();
-        app.execute_submit_sql();
+        app.execute_run();
         assert_eq!(app.execute_phase, ExecutePhase::EditSql);
         assert!(app.execute_input_mode);
         assert!(
             app.error_message
                 .as_deref()
                 .unwrap_or("")
-                .contains("Read-only"),
+                .contains("read-only"),
             "expected read-only guidance, got: {:?}",
             app.error_message
         );
@@ -789,10 +898,10 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_statement_in_exec_is_rejected_with_error() {
+    fn dollar_quoted_body_rejected_with_error() {
         let mut app = app_with_connections(&["only"]);
-        app.execute_sql_buffer = "WITH x AS (SELECT 1) SELECT * FROM x".to_string();
-        app.execute_submit_sql();
+        app.execute_sql_buffer = "DO $$ BEGIN END $$".to_string();
+        app.execute_run();
         assert_eq!(app.execute_phase, ExecutePhase::EditSql);
         assert!(app.execute_input_mode);
         assert!(app.error_message.is_some());
@@ -803,14 +912,13 @@ mod tests {
     fn confirm_no_returns_to_editor_without_dispatch() {
         let mut app = app_with_connections(&["only"]);
         app.execute_sql_buffer = "DROP TABLE t".to_string();
-        app.execute_submit_sql();
+        app.execute_run();
         assert_eq!(app.execute_phase, ExecutePhase::Confirm);
         app.execute_confirm_no();
         assert_eq!(app.execute_phase, ExecutePhase::EditSql);
-        assert_eq!(app.execute_pending_kind, None);
+        assert!(app.execute_destructive_items.is_empty());
         assert!(app.execute_input_mode);
         assert!(app.pending_action.is_none());
-        // Buffer is preserved so the user can edit instead of retyping.
         assert_eq!(app.execute_sql_buffer, "DROP TABLE t");
     }
 
@@ -818,38 +926,60 @@ mod tests {
     fn confirm_yes_dispatches_destructive_action() {
         let mut app = app_with_connections(&["only"]);
         app.execute_sql_buffer = "DROP TABLE t".to_string();
-        app.execute_submit_sql();
+        app.execute_run();
         assert_eq!(app.execute_phase, ExecutePhase::Confirm);
         app.execute_confirm_yes();
         assert_eq!(app.execute_phase, ExecutePhase::Result);
         assert!(app.is_loading);
         match app.take_action() {
-            Some(AppAction::ExecuteStatement { database, sql }) => {
+            Some(AppAction::ExecuteScript {
+                database,
+                statements,
+            }) => {
                 assert_eq!(database, "only");
-                assert_eq!(sql, "DROP TABLE t");
+                assert_eq!(statements.len(), 1);
+                assert_eq!(statements[0].statement.first_keyword, "DROP");
             }
-            other => panic!("expected ExecuteStatement, got {other:?}"),
+            other => panic!("expected ExecuteScript, got {other:?}"),
         }
     }
 
     #[test]
-    fn execute_completion_populates_result_and_clears_loading() {
+    fn paste_appends_to_buffer_in_editor() {
+        let mut app = app_with_connections(&["only"]);
+        // enter_execute_screen with single db already turned on input_mode.
+        assert!(app.execute_input_mode);
+        app.execute_append_paste("INSERT INTO t\n");
+        app.execute_append_paste("VALUES (1);");
+        assert_eq!(app.execute_sql_buffer, "INSERT INTO t\nVALUES (1);");
+    }
+
+    #[test]
+    fn paste_ignored_outside_editor_input_mode() {
+        let mut app = app_with_connections(&["only"]);
+        app.execute_input_mode = false;
+        app.execute_append_paste("DROP TABLE t");
+        assert_eq!(app.execute_sql_buffer, "");
+    }
+
+    #[test]
+    fn execute_completion_populates_results_and_clears_loading() {
         use databasecli_core::commands::execute::ExecuteResult;
         use std::time::Duration;
 
         let mut app = app_with_connections(&["only"]);
         app.is_loading = true;
-        app.on_execute_completed(ExecuteResult {
+        app.on_execute_completed(vec![ExecuteResult {
             database_name: "only".to_string(),
             command_tag: "DELETE 3".to_string(),
             affected_rows: Some(3),
             columns: Vec::new(),
             rows: Vec::new(),
             execution_time: Duration::from_millis(1),
-        });
+        }]);
         assert_eq!(app.execute_phase, ExecutePhase::Result);
         assert!(!app.is_loading);
-        assert!(app.execute_result.is_some());
+        assert_eq!(app.execute_results.len(), 1);
     }
 
     #[test]

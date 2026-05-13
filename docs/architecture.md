@@ -110,20 +110,36 @@ AI agent (stdio) → rmcp transport
   → JSON response on stdout
 ```
 
-### Local `exec`
+### Local `exec` (inline)
 
 ```
 operator → databasecli exec --db <name> [--yes] "<SQL>"
-  → run_exec (crates/databasecli-cli/src/run.rs)
-  → validate_single_statement (rejects WITH, dollar-quotes, multi-statement)
-  → classify_keyword → Read | Write | Destructive | Unsupported
+  → run_exec → run_exec_inline (crates/databasecli-cli/src/run.rs)
+  → validate_single_statement (single stmt; resolves WITH ... DML via resolve_with_kind;
+                               rejects dollar-quoted bodies and multi-statement)
+  → NormalizedStatement.kind → Read | Write | Destructive | Unsupported
   → if Destructive: prompt unless --yes (or fail with ExecConfirmationRequired in non-interactive)
   → connect_for_local_exec (fresh writable connection, statement_timeout=30s)
-  → execute_normalized → either Client::execute or Client::query (when RETURNING is present)
+  → execute_normalized → either Client::execute or Client::query (when top-level RETURNING is present)
   → format_execute_result → stdout
 ```
 
-The same state machine is reproduced in the TUI `Execute` screen via the `ExecutePhase` enum (PickDatabase → EditSql → Confirm → Result).
+### Local `exec --file`
+
+```
+operator → databasecli exec --db <name> --file <PATH> [--transaction] [--yes]
+  → run_exec → run_exec_file
+  → fs::read_to_string
+  → split_script (string-literal/comment aware; rejects dollar-quoted bodies)
+  → reject Read/Unsupported chunks with line context
+  → optionally wrap in injected BEGIN/COMMIT (when --transaction)
+  → scan for Destructive chunks → single prompt listing all with line numbers (unless --yes)
+  → connect_for_local_exec (one fresh writable connection for the whole script)
+  → execute_script (sequential execute_normalized per chunk; stops at first error)
+  → format_script_results → stdout (per-statement header + body)
+```
+
+The TUI `Execute` screen drives the same flow via `AppAction::ExecuteScript`. The multi-line buffer is split with `split_script` exactly as `--file` does; bracketed paste keeps newlines intact when a script is pasted from the clipboard.
 
 ## Pipeline / ordering details
 

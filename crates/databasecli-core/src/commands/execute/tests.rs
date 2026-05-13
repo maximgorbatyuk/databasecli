@@ -246,15 +246,110 @@ fn classify_destructive_keywords() {
 }
 
 #[test]
-fn classify_with_is_unsupported() {
+fn classify_with_select_is_read() {
+    // WITH ... SELECT chains are read-only. They are accepted by validation
+    // but execute_normalized still rejects them with the standard "use query"
+    // message because they belong on the read-only path.
     assert_eq!(
         classify_statement("WITH x AS (SELECT 1) SELECT * FROM x"),
-        StatementKind::Unsupported
+        StatementKind::Read
     );
+}
+
+#[test]
+fn classify_with_insert_is_write() {
     assert_eq!(
-        classify_statement("WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x"),
-        StatementKind::Unsupported
+        classify_statement("WITH s AS (SELECT 1) INSERT INTO t SELECT * FROM s"),
+        StatementKind::Write
     );
+}
+
+#[test]
+fn classify_with_outer_insert_inner_destructive_is_destructive() {
+    // The outer DML is INSERT (non-destructive) but a CTE body deletes,
+    // which makes the overall operation destructive. The kind picks up the
+    // most severe verb across the chain; the effective verb (for the tag)
+    // stays the outer INSERT.
+    let n = validate_single_statement(
+        "WITH d AS (DELETE FROM t RETURNING id) INSERT INTO log SELECT id FROM d",
+    )
+    .unwrap();
+    assert_eq!(n.kind(), StatementKind::Destructive);
+    assert_eq!(n.effective_verb, "INSERT");
+    assert_eq!(n.first_keyword, "WITH");
+}
+
+#[test]
+fn classify_with_outer_delete_is_destructive() {
+    let n = validate_single_statement("WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (TABLE s)")
+        .unwrap();
+    assert_eq!(n.kind(), StatementKind::Destructive);
+    assert_eq!(n.effective_verb, "DELETE");
+}
+
+#[test]
+fn classify_with_users_reproducer_is_write() {
+    // Real-world seed pattern: chain INSERTs, no destructive verbs.
+    let sql = "WITH ev AS (\n  INSERT INTO events (slug, name) VALUES ('dev', 'Dev') RETURNING id\n),\nup AS (\n  INSERT INTO user_profiles (full_name, email_address) VALUES ('M', 'm@x.com') RETURNING id\n)\nINSERT INTO crew_profiles (user_profile_id, event_id)\nSELECT (SELECT id FROM up), (SELECT id FROM ev)";
+    let n = validate_single_statement(sql).unwrap();
+    assert_eq!(n.kind(), StatementKind::Write);
+    assert_eq!(n.effective_verb, "INSERT");
+    // The outer INSERT has no top-level RETURNING. The RETURNINGs that exist
+    // are inside CTE bodies (depth > 0) and must not trick the executor into
+    // the prepare/query path.
+    assert!(
+        !n.has_returning,
+        "outer INSERT has no top-level RETURNING; CTE-body RETURNINGs must be ignored"
+    );
+}
+
+#[test]
+fn classify_with_no_resolvable_outer_is_unsupported() {
+    // Just a CTE list with no following statement — Postgres would reject
+    // this; we reject it earlier.
+    let err = validate_single_statement("WITH x AS (SELECT 1)").unwrap_err();
+    assert!(matches!(err, DatabaseCliError::UnsupportedExecStatement(_)));
+}
+
+#[test]
+fn classify_with_nested_cte_destructive_is_destructive() {
+    // PostgreSQL accepts nested WITH inside a CTE body. The inner DELETE
+    // sits at paren-depth 2, but the overall operation is still destructive
+    // and must trigger the confirmation prompt.
+    let n = validate_single_statement(
+        "WITH outer_cte AS (WITH inner_cte AS (DELETE FROM t RETURNING id) SELECT * FROM inner_cte) INSERT INTO log SELECT * FROM outer_cte",
+    )
+    .unwrap();
+    assert_eq!(
+        n.kind(),
+        StatementKind::Destructive,
+        "nested DELETE inside a CTE body must bubble up to Destructive"
+    );
+    assert_eq!(n.effective_verb, "INSERT");
+}
+
+#[test]
+fn classify_with_destructive_inside_subquery_of_cte_body_is_destructive() {
+    // Defensive over-capture: a destructive verb that PG would parse inside a
+    // sub-paren of a CTE body is treated as destructive even when the
+    // surrounding shape would not be valid SQL. Conservative classification
+    // is the safer direction.
+    let n = validate_single_statement(
+        "WITH d AS (SELECT 1 WHERE EXISTS (DELETE FROM other RETURNING id)) INSERT INTO log SELECT 1 FROM d",
+    )
+    .unwrap();
+    assert_eq!(n.kind(), StatementKind::Destructive);
+    assert_eq!(n.effective_verb, "INSERT");
+}
+
+#[test]
+fn with_recursive_resolves_outer_verb() {
+    let n = validate_single_statement(
+        "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n+1 FROM t WHERE n<5) INSERT INTO log SELECT n FROM t",
+    )
+    .unwrap();
+    assert_eq!(n.kind(), StatementKind::Write);
+    assert_eq!(n.effective_verb, "INSERT");
 }
 
 #[test]
@@ -506,4 +601,241 @@ fn format_elapsed_always_in_seconds_with_three_decimals() {
             "duration {dur:?} should render as {expected}, got: {out}"
         );
     }
+}
+
+// Transaction control verbs
+
+#[test]
+fn classify_transaction_control_verbs_are_write() {
+    for sql in [
+        "BEGIN",
+        "BEGIN ISOLATION LEVEL SERIALIZABLE",
+        "COMMIT",
+        "ROLLBACK",
+        "START TRANSACTION",
+        "END",
+        "SAVEPOINT s1",
+        "RELEASE SAVEPOINT s1",
+        "SET LOCAL search_path = public",
+        "RESET search_path",
+        "LOCK TABLE t IN EXCLUSIVE MODE",
+        "LISTEN ch",
+        "UNLISTEN ch",
+        "NOTIFY ch",
+        "CHECKPOINT",
+    ] {
+        assert_eq!(
+            classify_statement(sql),
+            StatementKind::Write,
+            "input: {sql}"
+        );
+    }
+}
+
+#[test]
+fn classify_merge_is_destructive() {
+    assert_eq!(
+        classify_statement(
+            "MERGE INTO t USING src ON t.id = src.id WHEN MATCHED THEN UPDATE SET x = src.x"
+        ),
+        StatementKind::Destructive
+    );
+}
+
+// split_script
+
+#[test]
+fn split_script_empty_input_errors() {
+    assert!(matches!(
+        split_script(""),
+        Err(DatabaseCliError::EmptyQuery)
+    ));
+    assert!(matches!(
+        split_script("   \n  \n"),
+        Err(DatabaseCliError::EmptyQuery)
+    ));
+}
+
+#[test]
+fn split_script_only_comments_errors() {
+    let err = split_script("-- only a comment\n/* and another */").unwrap_err();
+    assert!(
+        matches!(err, DatabaseCliError::EmptyQuery)
+            || matches!(err, DatabaseCliError::UnsupportedExecStatement(_)),
+        "expected empty or unsupported, got: {err:?}"
+    );
+}
+
+#[test]
+fn split_script_single_statement_no_semicolon() {
+    let out = split_script("INSERT INTO t VALUES (1)").unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].statement.first_keyword, "INSERT");
+    assert_eq!(out[0].start_line, 1);
+}
+
+#[test]
+fn split_script_single_statement_trailing_semicolon() {
+    let out = split_script("INSERT INTO t VALUES (1);").unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].statement.first_keyword, "INSERT");
+}
+
+#[test]
+fn split_script_multiple_statements() {
+    let out =
+        split_script("INSERT INTO a VALUES (1);\nUPDATE b SET x = 2;\nDELETE FROM c").unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].statement.first_keyword, "INSERT");
+    assert_eq!(out[0].start_line, 1);
+    assert_eq!(out[1].statement.first_keyword, "UPDATE");
+    assert_eq!(out[1].start_line, 2);
+    assert_eq!(out[2].statement.first_keyword, "DELETE");
+    assert_eq!(out[2].start_line, 3);
+}
+
+#[test]
+fn split_script_begin_commit_block() {
+    let out = split_script("BEGIN;\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\nCOMMIT;")
+        .unwrap();
+    assert_eq!(out.len(), 4);
+    assert_eq!(out[0].statement.first_keyword, "BEGIN");
+    assert_eq!(out[3].statement.first_keyword, "COMMIT");
+}
+
+#[test]
+fn split_script_with_dml_chain() {
+    let out = split_script(
+        "BEGIN;\nWITH ev AS (\n  INSERT INTO events (slug) VALUES ('dev') RETURNING id\n)\nINSERT INTO log (event_id) SELECT id FROM ev;\nCOMMIT;",
+    )
+    .unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].statement.first_keyword, "BEGIN");
+    assert_eq!(out[1].statement.first_keyword, "WITH");
+    assert_eq!(out[1].statement.effective_verb, "INSERT");
+    assert_eq!(out[1].statement.kind(), StatementKind::Write);
+    assert_eq!(out[2].statement.first_keyword, "COMMIT");
+}
+
+#[test]
+fn split_script_semicolon_inside_string_literal() {
+    let out = split_script("INSERT INTO t VALUES ('a;b');\nUPDATE t SET x = 1").unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].statement.first_keyword, "INSERT");
+    assert_eq!(out[1].statement.first_keyword, "UPDATE");
+}
+
+#[test]
+fn split_script_semicolon_inside_line_comment() {
+    let out = split_script("INSERT INTO t VALUES (1); -- hi; bye\nDELETE FROM t").unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[1].statement.first_keyword, "DELETE");
+}
+
+#[test]
+fn split_script_semicolon_inside_block_comment() {
+    let out =
+        split_script("INSERT INTO t VALUES (1) /* note; with semis */;\nDELETE FROM t").unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[1].statement.first_keyword, "DELETE");
+}
+
+#[test]
+fn split_script_rejects_dollar_quoted_bodies() {
+    let err = split_script("DO $$ BEGIN END $$;\nINSERT INTO t VALUES (1)").unwrap_err();
+    assert!(matches!(err, DatabaseCliError::UnsupportedExecStatement(_)));
+}
+
+#[test]
+fn split_script_reports_line_number_for_chunk_validation_failure() {
+    // Procedural DO blocks are rejected by validate_single_statement.
+    // Wait — the dollar-quote scanner runs over the entire script first and
+    // catches `DO $$ ... $$` globally. To exercise the per-chunk line-number
+    // annotation we use an unterminated block comment, which the script-wide
+    // scanner doesn't reject (it's a chunk-local error).
+    let err = split_script(
+        "INSERT INTO a VALUES (1);\nUPDATE b SET x = 2;\nDELETE FROM c /* unterminated",
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("line 3"),
+        "expected line-3 annotation in error, got: {msg}"
+    );
+    assert!(
+        msg.contains("unterminated") || msg.contains("block comment"),
+        "expected block-comment context, got: {msg}"
+    );
+}
+
+#[test]
+fn split_script_skips_comment_only_chunk_after_semicolon() {
+    // psql-style: `INSERT ...;\n-- trailing comment` is one statement, not a
+    // statement followed by an EmptyQuery error. The trailing comment-only
+    // chunk is silently dropped.
+    let out = split_script("INSERT INTO t VALUES (1);\n-- end of seed").unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].statement.first_keyword, "INSERT");
+}
+
+#[test]
+fn split_script_skips_stray_semicolon_between_comments() {
+    let out = split_script("-- header\n;\nINSERT INTO t VALUES (1);\n-- footer").unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].statement.first_keyword, "INSERT");
+}
+
+#[test]
+fn split_script_dollar_quote_message_is_global() {
+    // Dollar-quote rejection is a script-level scan, not per-chunk. The
+    // error message focuses on the syntax, not a specific line.
+    let err = split_script("INSERT INTO a VALUES (1);\nDO $$ BEGIN END $$").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("dollar-quoted"), "got: {msg}");
+}
+
+#[test]
+fn split_script_preserves_executable_text_per_chunk() {
+    let out = split_script("/* hint */ INSERT INTO t VALUES (1);\nUPDATE t /* inline */ SET x = 2")
+        .unwrap();
+    assert_eq!(out[0].statement.sql, "/* hint */ INSERT INTO t VALUES (1)");
+    assert_eq!(out[1].statement.sql, "UPDATE t /* inline */ SET x = 2");
+}
+
+#[test]
+fn split_script_blank_lines_advance_line_counter() {
+    let out = split_script("\n\nINSERT INTO a VALUES (1);\n\nUPDATE b SET x = 2").unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].start_line, 3);
+    assert_eq!(out[1].start_line, 5);
+}
+
+// format_script_results
+
+#[test]
+fn format_script_results_emits_per_statement_header_with_line_number() {
+    let statements = split_script("INSERT INTO a VALUES (1);\nUPDATE b SET x = 2").unwrap();
+    let results = vec![
+        ExecuteResult {
+            database_name: "db".to_string(),
+            command_tag: "INSERT 1".to_string(),
+            affected_rows: Some(1),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            execution_time: Duration::from_millis(5),
+        },
+        ExecuteResult {
+            database_name: "db".to_string(),
+            command_tag: "UPDATE 3".to_string(),
+            affected_rows: Some(3),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            execution_time: Duration::from_millis(7),
+        },
+    ];
+    let out = format_script_results(&statements, &results);
+    assert!(out.contains("-- line 1: INSERT 1"));
+    assert!(out.contains("-- line 2: UPDATE 3"));
+    assert!(out.contains("1 row affected"));
+    assert!(out.contains("3 rows affected"));
 }

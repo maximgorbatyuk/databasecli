@@ -22,19 +22,44 @@ const ALL_MCP_SOURCES: &[(&str, &str)] = &[
     ("src/tools/schema.rs", TOOLS_SCHEMA_RS),
 ];
 
-/// Primary guard: the MCP crate must never reach the writable execution path.
+/// Primary guard: the MCP crate must never reach any writable execution
+/// helper or the writable connection helper in `databasecli-core`.
 ///
-/// `execute_statement` is the only function in `databasecli-core` that runs
-/// arbitrary SQL against a writable connection. If it ever appears in the MCP
-/// crate, AI agents can write through MCP — which the project documents as
-/// impossible.
+/// Each banned symbol is a doorway to writes:
+/// - `execute_statement`, `execute_normalized`, `execute_script`: run arbitrary
+///   SQL on a writable connection.
+/// - `connect_for_local_exec`: opens a connection without
+///   `default_transaction_read_only = on`, which is the only way to escape the
+///   server-side read-only guarantee.
+///
+/// If any of these names appear in MCP source, an AI agent can write through
+/// MCP — which the project documents as impossible.
+///
+/// # Invariant anchor
+///
+/// The `ConnectionMode::LocalExec` enum variant in
+/// `crates/databasecli-core/src/connection.rs` is private to the connection
+/// module. Any future writable connection mode therefore requires a *new*
+/// public function in `databasecli-core` — and that function name must be
+/// added to `BANNED` below in the same change. Keep the list aligned with
+/// the public surface of `databasecli-core` so the build catches an MCP
+/// surface that reaches a new writable doorway.
 #[test]
-fn mcp_does_not_reference_execute_statement() {
+fn mcp_does_not_reference_writable_helpers() {
+    const BANNED: &[&str] = &[
+        "execute_statement",
+        "execute_normalized",
+        "execute_script",
+        "connect_for_local_exec",
+    ];
     for (path, src) in ALL_MCP_SOURCES {
-        assert!(
-            !src.contains("execute_statement"),
-            "{path} references `execute_statement`. The MCP surface must stay read-only; see docs/plans/execution.md."
-        );
+        for banned in BANNED {
+            assert!(
+                !src.contains(banned),
+                "{path} references `{banned}`. The MCP surface must stay read-only; \
+                 see docs/plans/execution.md."
+            );
+        }
     }
 }
 

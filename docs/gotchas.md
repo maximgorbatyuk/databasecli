@@ -16,7 +16,7 @@ The TUI assumes single-letter shortcuts like `q`, `j`, `k`, `i`. To stay usable 
 
 ## MCP cannot run writes — and the build enforces it
 
-`crates/databasecli-mcp/tests/guard.rs` is more than a smoke test. It (1) refuses to compile the test suite if any MCP source string contains `execute_statement`, (2) refuses if any top-level `fn` in `server.rs` is not on a hand-maintained allowlist, (3) refuses if `validate_readonly` ever stops rejecting common write verbs or multi-statement smuggling. The intended workflow when adding an MCP tool is described in [`./interactions.md`](./interactions.md) — skip a step and the test fails the build, not just the suite. Source: [`crates/databasecli-mcp/tests/guard.rs`](../crates/databasecli-mcp/tests/guard.rs).
+`crates/databasecli-mcp/tests/guard.rs` is more than a smoke test. It (1) refuses to compile the test suite if any MCP source string contains any of the banned writable-helper symbols (`execute_statement`, `execute_normalized`, `execute_script`, `connect_for_local_exec`), (2) refuses if any top-level `fn` in `server.rs` is not on a hand-maintained allowlist, (3) refuses if `validate_readonly` ever stops rejecting common write verbs or multi-statement smuggling. The intended workflow when adding an MCP tool is described in [`./interactions.md`](./interactions.md) — skip a step and the test fails the build, not just the suite. Source: [`crates/databasecli-mcp/tests/guard.rs`](../crates/databasecli-mcp/tests/guard.rs).
 
 ## The `exec` validator is stricter than PostgreSQL on purpose
 
@@ -26,9 +26,19 @@ The TUI assumes single-letter shortcuts like `q`, `j`, `k`, `i`. To stay usable 
 
 `validate_single_statement` strips comments to a separate analysis copy used only for classification (first-keyword extraction, `RETURNING` detection, multi-statement scan). The executable string is built from the *original* operator input with only surrounding whitespace trimmed and at most one trailing semicolon removed. This invariant prevents an unterminated `/*` from silently widening a destructive statement. If you change either path, keep the executable string close to the original — the safety guarantee depends on it. Source: code comments in [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
 
-## `exec` rejects `WITH` and `COPY`
+## `exec` accepts `WITH ... DML` via a heuristic, not a real parser
 
-`exec` v1 deliberately rejects `WITH` (writable CTEs cannot be classified safely without a real parser) and `COPY` (PostgreSQL's `COPY` requires `copy_in`/`copy_out` streaming APIs that the `exec` path does not implement). Treating either as a regular write would silently mis-handle the statement. Source: `classify_keyword` and `is_row_count_meaningful` in [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
+`exec` accepts a leading `WITH` when the chain resolves to a top-level DML statement (e.g. `WITH d AS (...) INSERT INTO ...`). `resolve_with_kind` walks the comment-stripped analysis copy, collects every classified verb that appears at paren depth 1 immediately after `(` (each CTE body's leading verb) plus the first classified verb at depth 0 after the first descent (the outer DML), and picks the **most severe** kind across them. The outer verb drives the command tag; severity drives the confirmation prompt. Mixed chains like `WITH d AS (DELETE...) INSERT ...` are classified `Destructive` so the operator is prompted, even though the outer is INSERT.
+
+Caveats: the heuristic is precision-loss tolerant. Pathological inputs that aren't valid PostgreSQL (e.g. `DELETE` nested inside a non-CTE subquery) may be under-classified, but they would fail at PostgreSQL parse time anyway. `WITH RECURSIVE`, `VALUES` CTE bodies, and INSERT/SELECT-source patterns all classify correctly. `WITH ... SELECT` chains are routed to the read-only path and rejected by `exec` with the standard "use query" message. Source: `resolve_with_kind` in [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
+
+## `exec` still rejects procedural bodies, dollar-quoted strings, and `COPY`
+
+`exec` rejects `DO $$ ... $$`, `CREATE FUNCTION ... AS $body$ ... $body$`, and any other dollar-quoted body — the validator does not model `$...$` escaping and cannot safely classify the inner body. `COPY` is rejected separately because the `exec` path does not implement the `copy_in`/`copy_out` streaming APIs that `COPY` requires; treating it as a regular write would either drop the data stream or produce a confusing protocol error. These bans apply to both inline `exec "..."` and `exec --file <PATH>`. Source: `contains_dollar_quote`, `classify_keyword`, and `split_script` in [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
+
+## `exec --file` runs every statement on a single writable connection
+
+When `exec --file <PATH>` is invoked, the splitter divides the file into single statements (string-literal and comment aware, dollar-quote rejecting) and a single `connect_for_local_exec` connection runs them in order. This is the deliberate exception to "open a fresh connection per call" — running BEGIN/COMMIT/SAVEPOINT across multiple connections would deadlock or break atomicity. The single-connection lifetime is bounded by one invocation; the connection is dropped immediately after the script finishes (success or first error). `--transaction` wraps the script in an injected BEGIN/COMMIT pair when the operator's file does not manage transactions itself. Source: `run_exec_file` in [`crates/databasecli-cli/src/run.rs`](../crates/databasecli-cli/src/run.rs), `split_script` and `execute_script` in [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
 
 ## `query_limit = 0` means unlimited
 
@@ -38,9 +48,9 @@ The `[settings] query_limit` value defaults to 500. Setting it to `0` disables t
 
 `DatabaseConfig::connection_string` always appends `connect_timeout=5`, and every code path (read-only and exec) sets `statement_timeout = '30s'` after connecting. There is no per-database override and no way to extend the budget for a long-running query. Long-running operational queries should be split or pre-aggregated. Source: [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs), [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs).
 
-## Local `exec` opens a fresh connection per call
+## Local `exec` opens a fresh connection per invocation
 
-The `exec` path does **not** reuse a `ConnectionManager` handle. Each call goes through `connect_for_local_exec`, which opens a new `postgres::Client` without `default_transaction_read_only = on`. This is a deliberate isolation: the read-only sessions held by `ConnectionManager` are never "promoted" to writable. It also means `exec` pays a connect cost per call — there is no batching. Source: [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs), [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
+Every `exec` invocation goes through `connect_for_local_exec`, which opens a brand new `postgres::Client` without `default_transaction_read_only = on`. The read-only sessions held by `ConnectionManager` are never "promoted" to writable. Inline `exec "..."` and the TUI's Execute screen both pay one connect per run. `exec --file` reuses that single fresh connection for every statement in the script (see the dedicated entry above) so BEGIN/COMMIT/SAVEPOINT work as written, but the connection still belongs to that one invocation and is dropped when the script ends. Source: [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs), [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs).
 
 ## `exec` requires exactly one `--db`
 
@@ -48,7 +58,15 @@ The `exec` path does **not** reuse a `ConnectionManager` handle. Each call goes 
 
 ## Destructive `exec` fails fast in non-interactive shells
 
-When `stdin` is not a TTY and the statement is destructive (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`), `run_exec` returns `DatabaseCliError::ExecConfirmationRequired` instead of blocking on a prompt that would never receive input. Pass `--yes` to bypass the prompt. Source: [`crates/databasecli-cli/src/run.rs`](../crates/databasecli-cli/src/run.rs), [`crates/databasecli-core/src/error.rs`](../crates/databasecli-core/src/error.rs).
+When `stdin` is not a TTY and any statement in the run is destructive (`UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `MERGE`, or a `WITH` chain that contains any of those), `run_exec` returns `DatabaseCliError::ExecConfirmationRequired` instead of blocking on a prompt that would never receive input. For `exec --file`, the destructive scan covers every statement in the script; the single prompt then lists each destructive line with its source line number. Pass `--yes` to bypass the prompt. Source: [`crates/databasecli-cli/src/run.rs`](../crates/databasecli-cli/src/run.rs), [`crates/databasecli-core/src/error.rs`](../crates/databasecli-core/src/error.rs).
+
+## TUI Execute accepts pasted scripts and runs with F5 or Ctrl+R
+
+The Execute screen enables crossterm's bracketed-paste mode, so terminals deliver pasted multi-statement text as a single `Event::Paste(String)` instead of one `KeyCode::Char` per character. `execute_sql_buffer` is a multi-line buffer: `Enter` inserts a newline, `F5` runs. `Ctrl+R` is an alternate run key for terminals that drop function keys (notably tmux without `set -g xterm-keys on`, plus a handful of older emulators). Both keys work in input mode and read mode. Read mode (Esc out of input mode) accepts `c` to clear the buffer. The buffer is split via `split_script` exactly as `exec --file` does — same multi-statement semantics, same destructive confirmation list, same connection lifetime. Source: [`crates/databasecli-tui/src/lib.rs`](../crates/databasecli-tui/src/lib.rs), [`crates/databasecli-tui/src/event/execute.rs`](../crates/databasecli-tui/src/event/execute.rs), [`crates/databasecli-tui/src/app.rs`](../crates/databasecli-tui/src/app.rs).
+
+## `LiveConnection.client` is `pub(crate)`, not `pub`
+
+The raw `postgres::Client` inside `LiveConnection` is visible to command modules in `databasecli-core` (which need it to call `query`/`execute`/`prepare`) but **not** to dependent crates. `databasecli-mcp`, `databasecli-tui`, and `databasecli-cli` can only act on a connection through a function exported from `databasecli-core`. Combined with the `mcp_does_not_reference_writable_helpers` guard test, this means MCP cannot reach `client.execute(...)` even by reflection — there is no symbol to call, and the field accessor doesn't compile from outside the core crate. Server-side `default_transaction_read_only = on` remains the load-bearing guarantee; this is defense-in-depth. Source: [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs).
 
 ## `init` is idempotent — but only on the *databasecli* MCP entry
 
