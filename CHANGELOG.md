@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-06-24
+
+### Fixed
+
+- **CLI no longer panics on wide result cells**: rendering a very wide value (e.g. a ~300 KB `jsonb` cell) previously crashed with `Formatting argument out of range` because the dynamic `format!` width exceeded `u16::MAX`. A shared `commands::render::table_cell` now clips every cell to `MAX_COL_WIDTH` (200 chars) with an ellipsis and collapses embedded newlines/tabs before measuring or padding. The fix covers `query`, `sample`, and `exec` table output. Regression test renders `SELECT repeat('A',300000)` without panic.
+- **Malformed multi-statement error message**: submitting SQL with an internal `;` returned a garbled message that spliced the rule text into the read-only template. It now returns a dedicated `DatabaseCliError::MultiStatement` with a clear message. A single trailing `;` (`SELECT … ;`) is now tolerated on the read-only path (CLI and MCP).
+
+### Added
+
+- **`databasecli query` output formats**: `--format table|csv|tsv|json|ndjson` plus `--no-header`. Row data goes to stdout; row count, timing, and truncation notices go to stderr so piped output stays clean. CSV/TSV use RFC 4180 quoting, fixing embedded newlines/tabs/commas that previously broke line/column parsing. SQL `NULL` is now distinct from data across all formats: the literal text `NULL` in tables, an empty field in csv/tsv, and json `null` in json/ndjson (matching `export`); this also corrects the MCP `query` JSON, which previously emitted NULL as the string `"NULL"`. With `--all-databases`, json prints one document per database — use ndjson for a single combined stream.
+- **`databasecli query --limit N`**: override `[settings] query_limit` per run (`0` = unlimited). The truncation notice now points at `--limit`/`LIMIT`/`OFFSET`/`query_limit`.
+- **`databasecli export <table>|--query <SQL> --format csv|jsonl|sql [--output FILE] [--schema <name>]`**: stream a table or read-only query to disk/stdout through a server-side cursor (`DECLARE … FETCH` in batches). Not bounded by `query_limit`, chunked under the statement timeout, and never routed through the ASCII renderer — the supported answer to "dump this table". `--format sql` emits `INSERT` statements (null-aware, type-aware quoting) and requires a table target. Read-only; never exposed via MCP.
+- **Configurable `statement_timeout`**: `[settings] statement_timeout` (default `30s`) and a global `--timeout <duration>` flag (accepts `ms`, `s`, `min`, `h`; `0`/`disable` turns it off). Applies to read-only, MCP, and `exec` connections. Values are normalized by `config::normalize_statement_timeout` before interpolation, so only digits and a known unit reach `SET statement_timeout`.
+- **Optional connection `schema`**: a per-connection `schema` key in `databases.ini` sets the connection `search_path` (single name or comma-separated, e.g. `analytics, public`) so unqualified table names resolve against it on every path (`query`, `sample`, `schema`, `exec`, and MCP). Values are normalized by `config::normalize_search_path` into double-quoted identifiers before reaching `SET search_path`, so only valid identifiers are interpolated; an invalid value fails the connect with `InvalidSearchPath`. Surfaced in the MCP `list_configured_databases` output.
+
 ## [0.1.8] - 2026-05-13
 
 ### Added

@@ -17,6 +17,7 @@ pub fn config_to_json(config: &DatabaseConfig) -> Value {
         "port": config.port,
         "dbname": config.dbname,
         "user": config.user,
+        "schema": config.schema,
     })
 }
 
@@ -250,7 +251,7 @@ mod tests {
             database_name: "testdb".to_string(),
             columns: vec!["id".to_string(), "name".to_string()],
             rows: (0..row_count)
-                .map(|i| vec![i.to_string(), format!("row_{i}")])
+                .map(|i| vec![Some(i.to_string()), Some(format!("row_{i}"))])
                 .collect(),
             row_count,
             execution_time: Duration::from_millis(42),

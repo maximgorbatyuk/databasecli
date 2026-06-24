@@ -17,7 +17,7 @@ For service identity, the detected stack, environment variables, and practical c
                                │   databasecli-core           │  ──► local filesystem:
                                │   (config, connection,       │      .databasecli/databases.ini
                                │    health, query, exec,      │      .mcp.json, .cursor/mcp.json
-                               │    schema, analyze, ...)     │      opencode.jsonc, .codex/config.toml
+                               │    export, schema, ...)      │      opencode.jsonc, .codex/config.toml
                                └──────────────────────────────┘
 ```
 
@@ -83,6 +83,21 @@ operator → cargo / installed binary
   → stdout
 ```
 
+`commands::render` is the shared formatting helper used by the table renderers in `query`/`sample`/`exec` (cell clipping to avoid the `u16` format-width panic) and by the csv/tsv field quoting in `query` and `export`.
+
+### Read-only `export` (streaming cursor)
+
+```
+operator → databasecli export --db <name> <table>|--query "<SQL>" [--format csv|jsonl|sql] [--output FILE]
+  → run_export (crates/databasecli-cli/src/run.rs)
+  → commands::export::{table_request | query_request} (validate_identifier / validate_readonly)
+  → ConnectionManager (read-only connection; exactly one --db required)
+  → commands::export::export — DECLARE NO SCROLL CURSOR + batched FETCH FORWARD inside a transaction
+  → stream rows to FILE or stdout (never materialized; ignores query_limit)
+```
+
+This path is CLI/TUI-only and never wired into the MCP surface.
+
 ### TUI
 
 ```
@@ -119,7 +134,7 @@ operator → databasecli exec --db <name> [--yes] "<SQL>"
                                rejects dollar-quoted bodies and multi-statement)
   → NormalizedStatement.kind → Read | Write | Destructive | Unsupported
   → if Destructive: prompt unless --yes (or fail with ExecConfirmationRequired in non-interactive)
-  → connect_for_local_exec (fresh writable connection, statement_timeout=30s)
+  → connect_for_local_exec (fresh writable connection; statement_timeout from [settings]/--timeout, default 30s)
   → execute_normalized → either Client::execute or Client::query (when top-level RETURNING is present)
   → format_execute_result → stdout
 ```

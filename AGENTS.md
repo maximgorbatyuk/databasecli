@@ -22,8 +22,10 @@ For service identity, detected stack, environment variables, and practical comma
 
 ## Connection rules
 
-- The MCP and read-only paths must use `ConnectionManager::connect`, which sets `default_transaction_read_only = on` and `statement_timeout = '30s'`.
-- The `exec` path must use `connect_for_local_exec`, which omits the read-only setup but keeps `statement_timeout = '30s'`. Do not reuse a `ConnectionManager` handle for writes; open a fresh short-lived connection per `exec` call.
+- The MCP and read-only paths must use `ConnectionManager::connect`, which sets `default_transaction_read_only = on` and `statement_timeout` (default `30s`, configurable via `[settings] statement_timeout` / `--timeout`). Build the manager with `ConnectionManager::with_statement_timeout` so the configured value is applied.
+- The `exec` path must use `connect_for_local_exec(config, statement_timeout)`, which omits the read-only setup but keeps the same `statement_timeout`. Do not reuse a `ConnectionManager` handle for writes; open a fresh short-lived connection per `exec` call.
+- The `statement_timeout` value must always pass through `config::normalize_statement_timeout` before reaching `SET statement_timeout = '...'` — never interpolate raw user input into that statement.
+- The optional connection `schema` must always pass through `config::normalize_search_path` (which validates and double-quotes each identifier) before reaching `SET search_path TO ...` — never interpolate the raw INI value into that statement.
 - TLS uses `native_tls` with `danger_accept_invalid_certs(true)`. Connections are encrypted but not CA-verified. Do not silently change this default — it is documented in `docs/gotchas.md` and any tightening must update that doc.
 
 ## SQL execution rules

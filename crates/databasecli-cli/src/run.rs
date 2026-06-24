@@ -8,15 +8,21 @@ use databasecli_core::commands::execute::{
     ScriptStatement, StatementKind, execute_normalized, execute_script, format_execute_result,
     format_script_results, split_script, validate_single_statement,
 };
+use databasecli_core::commands::export::{
+    ExportFormat, ExportRequest, export, query_request, table_request,
+};
 use databasecli_core::commands::health::{check_all_enhanced_health, format_enhanced_health_table};
 use databasecli_core::commands::list_databases::{format_connected_table, list_connected};
-use databasecli_core::commands::query::{execute_query, format_query_result};
+use databasecli_core::commands::query::{
+    OutputFormat, execute_query, format_query_data, format_query_summary,
+};
 use databasecli_core::commands::sample::{format_sample, sample_table};
 use databasecli_core::commands::schema::{dump_schema, format_schema};
 use databasecli_core::commands::summary::{format_summary, summarize};
 use databasecli_core::commands::trend::{TrendInterval, TrendParams, compute_trend, format_trend};
 use databasecli_core::config::{
-    Settings, load_databases, load_settings, resolve_config_path_with_base,
+    Settings, load_databases, load_settings, normalize_statement_timeout,
+    resolve_config_path_with_base,
 };
 use databasecli_core::connection::{ConnectionManager, connect_for_local_exec};
 use databasecli_core::error::DatabaseCliError;
@@ -106,6 +112,17 @@ pub fn run_help() {
     print!("{}", format_help_text(&sections));
 }
 
+/// Resolve the effective statement_timeout: a `--timeout` flag (validated)
+/// overrides the `[settings]` value.
+fn resolve_statement_timeout(cli: &Cli, settings: &Settings) -> Result<String> {
+    match cli.timeout.as_deref() {
+        Some(raw) => normalize_statement_timeout(raw).ok_or_else(|| {
+            anyhow::anyhow!(DatabaseCliError::InvalidStatementTimeout(raw.to_string()))
+        }),
+        None => Ok(settings.statement_timeout.clone()),
+    }
+}
+
 fn establish_connections(cli: &Cli) -> Result<(ConnectionManager, Settings)> {
     let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
@@ -118,7 +135,8 @@ fn establish_connections(cli: &Cli) -> Result<(ConnectionManager, Settings)> {
         );
     }
 
-    let mut manager = ConnectionManager::new();
+    let timeout = resolve_statement_timeout(cli, &settings)?;
+    let mut manager = ConnectionManager::with_statement_timeout(timeout);
 
     if cli.all_databases {
         for config in &configs {
@@ -234,15 +252,77 @@ pub fn run_schema(cli: &Cli, schema: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_query(cli: &Cli, sql: &str) -> Result<()> {
+pub fn run_query(
+    cli: &Cli,
+    sql: &str,
+    limit: Option<u32>,
+    format: &str,
+    no_header: bool,
+) -> Result<()> {
+    let fmt = OutputFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
     let (mut manager, settings) = establish_connections(cli)?;
+    let effective_limit = limit.unwrap_or(settings.query_limit);
     let multi = manager.len() > 1;
     for (name, conn) in manager.iter_mut() {
-        let result = execute_query(conn, sql, Some(settings.query_limit))?;
+        let result = execute_query(conn, sql, Some(effective_limit))?;
+        // Keep stdout pure data; the per-database banner follows the data
+        // stream (stdout for the table view, stderr for machine formats).
         if multi {
-            println!("=== {} ===", name);
+            if fmt == OutputFormat::Table {
+                println!("=== {} ===", name);
+            } else {
+                eprintln!("=== {} ===", name);
+            }
         }
-        print!("{}", format_query_result(&result));
+        print!("{}", format_query_data(&result, fmt, !no_header));
+        eprint!("{}", format_query_summary(&result));
+    }
+    Ok(())
+}
+
+pub fn run_export(
+    cli: &Cli,
+    table: Option<&str>,
+    query: Option<&str>,
+    format: &str,
+    output: Option<&str>,
+    schema: &str,
+) -> Result<()> {
+    use std::io::{BufWriter, Write, stdout};
+
+    let fmt = ExportFormat::parse(format)?;
+    let request: ExportRequest = match (table, query) {
+        (Some(t), None) => table_request(schema, t, fmt)?,
+        (None, Some(q)) => query_request(q, fmt)?,
+        (Some(_), Some(_)) => anyhow::bail!("provide either a table or --query, not both"),
+        (None, None) => anyhow::bail!("provide a table name or --query <SQL>"),
+    };
+
+    let (mut manager, _settings) = establish_connections(cli)?;
+    if manager.len() != 1 {
+        anyhow::bail!("`export` requires exactly one --db <name>");
+    }
+    let (_, conn) = manager
+        .iter_mut()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no active connection"))?;
+
+    match output {
+        Some(path) => {
+            let file = std::fs::File::create(path)
+                .map_err(|e| anyhow::anyhow!("failed to create `{path}`: {e}"))?;
+            let mut w = BufWriter::new(file);
+            let n = export(conn, &request, &mut w)?;
+            w.flush()?;
+            eprintln!("Exported {n} row(s) to {path}");
+        }
+        None => {
+            let so = stdout();
+            let mut w = BufWriter::new(so.lock());
+            let n = export(conn, &request, &mut w)?;
+            w.flush()?;
+            eprintln!("Exported {n} row(s)");
+        }
     }
     Ok(())
 }
@@ -286,6 +366,8 @@ fn run_exec_inline(cli: &Cli, db_name: &str, sql: &str, yes: bool) -> Result<()>
 
     let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
+    let settings = load_settings(&path);
+    let timeout = resolve_statement_timeout(cli, &settings)?;
     let config = configs
         .iter()
         .find(|c| c.name == db_name)
@@ -317,7 +399,7 @@ fn run_exec_inline(cli: &Cli, db_name: &str, sql: &str, yes: bool) -> Result<()>
         StatementKind::Destructive | StatementKind::Write => {}
     }
 
-    let mut conn = connect_for_local_exec(config)?;
+    let mut conn = connect_for_local_exec(config, &timeout)?;
     let result = execute_normalized(&mut conn, &normalized)?;
     print!("{}", format_execute_result(&result));
     Ok(())
@@ -337,6 +419,8 @@ fn run_exec_file(
 
     let path = resolve_config_path_with_base(cli.directory.as_deref())?;
     let configs = load_databases(&path)?;
+    let settings = load_settings(&path);
+    let timeout = resolve_statement_timeout(cli, &settings)?;
     let config = configs
         .iter()
         .find(|c| c.name == db_name)
@@ -389,7 +473,7 @@ fn run_exec_file(
         }
     }
 
-    let mut conn = connect_for_local_exec(config)?;
+    let mut conn = connect_for_local_exec(config, &timeout)?;
     let results = execute_script(&mut conn, &statements)?;
     print!("{}", format_script_results(&statements, &results));
     Ok(())

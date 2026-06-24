@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::commands::query::cell_to_string;
+use crate::commands::render;
 use crate::connection::LiveConnection;
 use crate::error::DatabaseCliError;
 
@@ -643,24 +644,35 @@ pub fn format_execute_result(result: &ExecuteResult) -> String {
     };
 
     if !result.columns.is_empty() {
-        let col_widths: Vec<usize> = result
+        // Clip cells first so a wide RETURNING value can't push the format
+        // width past u16::MAX (which panics).
+        let names: Vec<String> = result
             .columns
+            .iter()
+            .map(|n| render::table_cell(n))
+            .collect();
+        let disp: Vec<Vec<String>> = result
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|v| render::table_cell(v)).collect())
+            .collect();
+
+        let col_widths: Vec<usize> = names
             .iter()
             .enumerate()
             .map(|(i, name)| {
-                let max_data = result
-                    .rows
+                let max_data = disp
                     .iter()
-                    .map(|row| row.get(i).map_or(0, |v| v.len()))
+                    .map(|row| row.get(i).map_or(0, |v| v.chars().count()))
                     .max()
                     .unwrap_or(0);
-                name.len().max(max_data).max(4)
+                name.chars().count().max(max_data).max(4)
             })
             .collect();
 
         let mut out = String::new();
 
-        for (i, name) in result.columns.iter().enumerate() {
+        for (i, name) in names.iter().enumerate() {
             if i > 0 {
                 out.push_str("  ");
             }
@@ -676,7 +688,7 @@ pub fn format_execute_result(result: &ExecuteResult) -> String {
         }
         out.push('\n');
 
-        for row in &result.rows {
+        for row in &disp {
             for (i, val) in row.iter().enumerate() {
                 if i > 0 {
                     out.push_str("  ");

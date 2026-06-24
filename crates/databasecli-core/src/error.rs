@@ -42,8 +42,26 @@ pub enum DatabaseCliError {
     #[error("read-only violation: statement begins with '{0}' which is not allowed")]
     ReadOnlyViolation(String),
 
+    #[error(
+        "multi-statement queries (containing ';') are not allowed — submit one statement at a time"
+    )]
+    MultiStatement,
+
     #[error("empty query")]
     EmptyQuery,
+
+    #[error("invalid output format '{0}': expected table, csv, tsv, json, or ndjson")]
+    InvalidOutputFormat(String),
+
+    #[error(
+        "invalid statement_timeout '{0}': expected 0/disable or a positive duration like 30s, 500ms, 5min, 1h"
+    )]
+    InvalidStatementTimeout(String),
+
+    #[error(
+        "invalid schema '{0}': expected one or more comma-separated identifiers like 'analytics' or 'analytics, public'"
+    )]
+    InvalidSearchPath(String),
 
     #[error("invalid identifier '{0}': must match [a-zA-Z_][a-zA-Z0-9_]*")]
     InvalidIdentifier(String),

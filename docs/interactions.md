@@ -9,8 +9,10 @@ This repo has three kinds of external interactions: synchronous PostgreSQL calls
 | Path | Caller | Purpose |
 |------|--------|---------|
 | `postgres::Client::connect` (TLS via `postgres-native-tls`) | [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs), [`crates/databasecli-core/src/health.rs`](../crates/databasecli-core/src/health.rs) | Open a synchronous connection. Connect timeout is 5 seconds (encoded in the connection string built by `DatabaseConfig::connection_string`). |
-| `SET default_transaction_read_only = on; SET statement_timeout = '30s'` | `open_client(.., ConnectionMode::ReadOnly)` | Applied to every connection used by `ConnectionManager` (CLI/TUI read commands and all MCP tools). |
-| `SET statement_timeout = '30s'` | `connect_for_local_exec` | Applied to every short-lived writable connection used by the local `exec` path. Inline `exec` uses one connection per statement; `exec --file` uses one connection per script invocation so BEGIN/COMMIT/SAVEPOINT work as written. |
+| `SET default_transaction_read_only = on; SET statement_timeout = '<timeout>'` | `open_client(.., ConnectionMode::ReadOnly)` | Applied to every connection used by `ConnectionManager` (CLI/TUI read commands and all MCP tools). `<timeout>` defaults to `30s` and comes from `[settings] statement_timeout` / `--timeout`, normalized by `config::normalize_statement_timeout`; `0` disables it. |
+| `SET statement_timeout = '<timeout>'` | `connect_for_local_exec` | Applied to every short-lived writable connection used by the local `exec` path. Same `<timeout>` resolution as above. Inline `exec` uses one connection per statement; `exec --file` uses one connection per script invocation so BEGIN/COMMIT/SAVEPOINT work as written. |
+| `SET search_path TO <schema>` | `open_client` (both modes) | Appended only when a connection profile sets the optional `schema` key. `<schema>` is normalized by `config::normalize_search_path` into one or more double-quoted identifiers before interpolation; an unparseable value fails the connect with `InvalidSearchPath`. |
+| `DECLARE … NO SCROLL CURSOR FOR <sql>` + batched `FETCH FORWARD` | `commands/export.rs::export` | Read-only streaming export. Pulls rows in batches through a server-side cursor inside a transaction so the result is never fully materialized; not bounded by `query_limit`. CLI/TUI-only, never exposed via MCP. |
 | `Client::query`, `Client::execute`, `Client::prepare`, `Client::simple_query` | command modules under [`crates/databasecli-core/src/commands/`](../crates/databasecli-core/src/commands) and [`crates/databasecli-core/src/health.rs`](../crates/databasecli-core/src/health.rs) | Read SQL, write SQL (RETURNING vs non-RETURNING), and the per-database `SELECT 1` heartbeat used by `check_health`. |
 
 TLS uses `native_tls::TlsConnector::builder().danger_accept_invalid_certs(true)`. Connections are encrypted but not CA-verified — see [`./gotchas.md`](./gotchas.md).
@@ -54,6 +56,8 @@ Running `databasecli init` writes config files into the operator's project. The 
 | `<base>/opencode.jsonc` (Opencode) | JSONC: `mcp.databasecli` entry | `upsert_opencode` |
 
 `<base>` defaults to the current working directory and is overridden by the `-D` flag (with `~` expansion). All upserts are idempotent — re-running `init` reports `Unchanged` when the entry is already present.
+
+Two read commands also write a single operator-specified file when given `--output`: `erd --output <file>` (diagram text) and `export --output <file>` (streamed csv/jsonl/sql). Both overwrite the path via `std::fs::File::create`; without `--output` they stream to stdout.
 
 The CLI dispatcher in [`crates/databasecli-cli/src/run.rs`](../crates/databasecli-cli/src/run.rs) (`run_init`) and the TUI `Init` action in [`crates/databasecli-tui/src/lib.rs`](../crates/databasecli-tui/src/lib.rs) both delegate to `databasecli_core::init::run_init`.
 

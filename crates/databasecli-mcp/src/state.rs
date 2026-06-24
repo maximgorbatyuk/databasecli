@@ -27,8 +27,9 @@ impl McpSessionState {
             }
         };
         let settings = load_settings(&path);
+        let manager = ConnectionManager::with_statement_timeout(settings.statement_timeout.clone());
         Ok(Self {
-            manager: Arc::new(Mutex::new(ConnectionManager::new())),
+            manager: Arc::new(Mutex::new(manager)),
             configs,
             settings,
         })

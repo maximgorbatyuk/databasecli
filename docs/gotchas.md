@@ -42,11 +42,27 @@ When `exec --file <PATH>` is invoked, the splitter divides the file into single 
 
 ## `query_limit = 0` means unlimited
 
-The `[settings] query_limit` value defaults to 500. Setting it to `0` disables the wrapper LIMIT for `query`/`compare`/MCP `query`. Any positive value caps the result set; the wrapper requests one extra row to detect truncation, and the `truncated` field on `QueryResultSet` indicates whether more rows existed. Source: [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs), [`crates/databasecli-core/src/commands/query.rs`](../crates/databasecli-core/src/commands/query.rs).
+The `[settings] query_limit` value defaults to 500. Setting it to `0` disables the wrapper LIMIT for `query`/`compare`/MCP `query`. Any positive value caps the result set; the wrapper requests one extra row to detect truncation, and the `truncated` field on `QueryResultSet` indicates whether more rows existed. The CLI `query` command also accepts `--limit N` to override the setting per run. To dump a whole table without fighting the cap, use `export`, which streams through a server-side cursor and ignores `query_limit` entirely. Source: [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs), [`crates/databasecli-core/src/commands/query.rs`](../crates/databasecli-core/src/commands/query.rs).
 
-## Connection timeout is 5 s, statement timeout is 30 s
+## `query` data goes to stdout, everything else to stderr
 
-`DatabaseConfig::connection_string` always appends `connect_timeout=5`, and every code path (read-only and exec) sets `statement_timeout = '30s'` after connecting. There is no per-database override and no way to extend the budget for a long-running query. Long-running operational queries should be split or pre-aggregated. Source: [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs), [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs).
+`databasecli query` writes only row data to stdout; the row count, timing, and any truncation warning go to stderr. This keeps `query --format csv > out.csv` clean. The truncation warning fires only when more rows existed than were returned (detected via the `limit + 1` fetch). Source: `run_query` in [`crates/databasecli-cli/src/run.rs`](../crates/databasecli-cli/src/run.rs).
+
+## Wide cells are clipped in table output to avoid a format-width panic
+
+Rust stores a dynamic `format!` width as a `u16`, so a width past 65 535 panics with "Formatting argument out of range". A single very wide cell (e.g. a 300 KB jsonb value) would otherwise crash `query`/`sample`/`exec` table rendering. `commands::render::table_cell` clips every cell to `MAX_COL_WIDTH` (200 chars) with an ellipsis and collapses embedded newlines/tabs before measuring or padding. Clipping applies **only to the ASCII table**; the `csv`/`tsv`/`json`/`ndjson` formats and `export` emit values in full and never go through the renderer, so use those for faithful wide/structured values. Source: [`crates/databasecli-core/src/commands/render.rs`](../crates/databasecli-core/src/commands/render.rs).
+
+## SQL NULL renders differently per output format
+
+`query` distinguishes SQL `NULL` from data by storing each cell as `Option<String>`. NULL renders as the literal text `NULL` in table output (human-facing), as an **empty field** in `csv`/`tsv`, and as JSON `null` in `json`/`ndjson`. `export` follows the same csv/jsonl conventions. This means a real NULL and a string whose value is literally `"NULL"` are indistinguishable in the table view but distinct in every machine format. Non-NULL values are always emitted as strings (even numbers/booleans) in json/ndjson, matching `export jsonl`. Source: [`crates/databasecli-core/src/commands/query.rs`](../crates/databasecli-core/src/commands/query.rs).
+
+## `export --format sql` quoting is type-limited
+
+`export --format sql` emits bare (unquoted) literals only for `bool` and the integer/float types it decodes numerically; everything else — including `NUMERIC`, which is not decoded as a number here — is single-quoted (PostgreSQL coerces the quoted form on insert). Two edge cases produce technically-invalid SQL: non-finite floats (`NaN`/`Infinity`) are emitted unquoted, and types the text fallback cannot decode (e.g. `bytea`, arrays) emit the placeholder `'(unsupported type)'`. Use `csv`/`jsonl` for tables containing those. Source: [`crates/databasecli-core/src/commands/export.rs`](../crates/databasecli-core/src/commands/export.rs).
+
+## Connection timeout is 5 s; statement timeout defaults to 30 s and is configurable
+
+`DatabaseConfig::connection_string` always appends `connect_timeout=5` (no override). The `statement_timeout` applied after connecting (read-only and exec alike) defaults to `30s` but is configurable: set `[settings] statement_timeout` or pass the global `--timeout <duration>` flag (accepts `ms`, `s`, `min`, `h`; `0`/`disable` turns it off). Values are normalized by `config::normalize_statement_timeout` before being interpolated into `SET statement_timeout = '<value>'`, so only digits and a known unit ever reach the SQL. For long analytical scans, raise or disable the timeout rather than splitting the query. Source: [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs), [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs).
 
 ## Local `exec` opens a fresh connection per invocation
 

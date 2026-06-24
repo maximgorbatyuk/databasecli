@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::commands::render;
 use crate::connection::LiveConnection;
 use crate::error::DatabaseCliError;
 
@@ -7,20 +8,38 @@ use crate::error::DatabaseCliError;
 pub struct QueryResultSet {
     pub database_name: String,
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    /// Row cells, `None` for SQL `NULL`. Keeping NULL distinct from data lets the
+    /// machine formats emit it faithfully (empty CSV field, JSON `null`) instead
+    /// of the ambiguous literal text `NULL`.
+    pub rows: Vec<Vec<Option<String>>>,
     pub row_count: usize,
     pub execution_time: Duration,
     pub truncated: bool,
 }
 
-pub fn validate_readonly(sql: &str) -> Result<(), DatabaseCliError> {
-    let stripped = strip_sql_comments(sql);
+/// Display text for a cell in human-facing table output: SQL `NULL` renders as
+/// the literal `NULL`.
+pub fn cell_display(cell: &Option<String>) -> &str {
+    cell.as_deref().unwrap_or("NULL")
+}
 
-    // Reject multi-statement queries (semicolons outside string literals)
+/// Strip a single optional trailing semicolon (after trailing whitespace) from
+/// raw SQL. `SELECT … ;` is a near-universal habit; tolerating exactly one
+/// trailing semicolon can never turn a single statement into a multi-statement
+/// one, so it is safe on the read-only path. An internal semicolon is left in
+/// place for the multi-statement check to reject.
+pub fn strip_trailing_semicolon(sql: &str) -> &str {
+    let trimmed = sql.trim_end();
+    trimmed.strip_suffix(';').unwrap_or(trimmed)
+}
+
+pub fn validate_readonly(sql: &str) -> Result<(), DatabaseCliError> {
+    let body = strip_trailing_semicolon(sql);
+    let stripped = strip_sql_comments(body);
+
+    // Reject multi-statement queries (semicolons outside string literals).
     if contains_unquoted_semicolon(&stripped) {
-        return Err(DatabaseCliError::ReadOnlyViolation(
-            "multi-statement queries (containing ';') are not allowed".to_string(),
-        ));
+        return Err(DatabaseCliError::MultiStatement);
     }
 
     let first_keyword = stripped
@@ -114,57 +133,62 @@ fn strip_sql_comments(sql: &str) -> String {
     result
 }
 
-pub fn cell_to_string(row: &postgres::Row, idx: usize) -> String {
+/// Stringify a cell, or `None` for SQL `NULL`. Callers that render NULL as the
+/// literal text `NULL` (table/JSON inspection paths) use [`cell_to_string`];
+/// callers that need to distinguish NULL from data (`export`) use this.
+pub fn cell_to_string_opt(row: &postgres::Row, idx: usize) -> Option<String> {
     use postgres::types::Type;
 
     let col_type = row.columns()[idx].type_();
 
     match *col_type {
-        Type::BOOL => row
-            .get::<_, Option<bool>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
-        Type::INT2 => row
-            .get::<_, Option<i16>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
-        Type::INT4 => row
-            .get::<_, Option<i32>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
-        Type::INT8 => row
-            .get::<_, Option<i64>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
-        Type::FLOAT4 => row
-            .get::<_, Option<f32>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
-        Type::FLOAT8 => row
-            .get::<_, Option<f64>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
+        Type::BOOL => row.get::<_, Option<bool>>(idx).map(|v| v.to_string()),
+        Type::INT2 => row.get::<_, Option<i16>>(idx).map(|v| v.to_string()),
+        Type::INT4 => row.get::<_, Option<i32>>(idx).map(|v| v.to_string()),
+        Type::INT8 => row.get::<_, Option<i64>>(idx).map(|v| v.to_string()),
+        Type::FLOAT4 => row.get::<_, Option<f32>>(idx).map(|v| v.to_string()),
+        Type::FLOAT8 => row.get::<_, Option<f64>>(idx).map(|v| v.to_string()),
         Type::JSON | Type::JSONB => row
             .get::<_, Option<serde_json::Value>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
-        Type::UUID => row
-            .get::<_, Option<uuid::Uuid>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
+            .map(|v| v.to_string()),
+        Type::UUID => row.get::<_, Option<uuid::Uuid>>(idx).map(|v| v.to_string()),
         Type::TIMESTAMPTZ => row
             .get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_rfc3339()),
+            .map(|v| v.to_rfc3339()),
         Type::TIMESTAMP => row
             .get::<_, Option<chrono::NaiveDateTime>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
+            .map(|v| v.to_string()),
         Type::DATE => row
             .get::<_, Option<chrono::NaiveDate>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
+            .map(|v| v.to_string()),
         Type::TIME => row
             .get::<_, Option<chrono::NaiveTime>>(idx)
-            .map_or("NULL".to_string(), |v| v.to_string()),
+            .map(|v| v.to_string()),
         _ => {
             // Fallback: try as text
             match row.try_get::<_, Option<String>>(idx) {
-                Ok(Some(v)) => v,
-                Ok(None) => "NULL".to_string(),
-                Err(_) => "(unsupported type)".to_string(),
+                Ok(Some(v)) => Some(v),
+                Ok(None) => None,
+                Err(_) => Some("(unsupported type)".to_string()),
             }
         }
     }
+}
+
+pub fn cell_to_string(row: &postgres::Row, idx: usize) -> String {
+    cell_to_string_opt(row, idx).unwrap_or_else(|| "NULL".to_string())
+}
+
+/// True for column types rendered as bare (unquoted) SQL literals in `export
+/// --format sql`. Limited to the types [`cell_to_string_opt`] decodes as real
+/// numbers/booleans; everything else (including NUMERIC, which is not decoded
+/// numerically here) is single-quoted so the emitted INSERT stays valid SQL.
+pub fn is_unquoted_sql_type(col_type: &postgres::types::Type) -> bool {
+    use postgres::types::Type;
+    matches!(
+        *col_type,
+        Type::BOOL | Type::INT2 | Type::INT4 | Type::INT8 | Type::FLOAT4 | Type::FLOAT8
+    )
 }
 
 fn should_wrap_with_limit(sql: &str) -> bool {
@@ -186,14 +210,17 @@ pub fn execute_query(
 
     let effective_limit = query_limit.filter(|&l| l > 0);
 
+    // Strip a tolerated trailing `;` so the query is safe to wrap in a subquery.
+    let body = strip_trailing_semicolon(sql);
+
     let effective_sql = match effective_limit {
-        Some(limit) if should_wrap_with_limit(sql) => {
+        Some(limit) if should_wrap_with_limit(body) => {
             format!(
-                "SELECT * FROM ({sql}) AS _limited_query LIMIT {}",
+                "SELECT * FROM ({body}) AS _limited_query LIMIT {}",
                 limit as i64 + 1
             )
         }
-        _ => sql.to_string(),
+        _ => body.to_string(),
     };
 
     let start = Instant::now();
@@ -210,11 +237,11 @@ pub fn execute_query(
         Vec::new()
     };
 
-    let mut data: Vec<Vec<String>> = rows
+    let mut data: Vec<Vec<Option<String>>> = rows
         .iter()
         .map(|row| {
             (0..row.columns().len())
-                .map(|i| cell_to_string(row, i))
+                .map(|i| cell_to_string_opt(row, i))
                 .collect()
         })
         .collect();
@@ -240,48 +267,137 @@ pub fn execute_query(
     })
 }
 
+/// Machine- and human-readable shapes for `databasecli query` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Table,
+    Csv,
+    Tsv,
+    Json,
+    Ndjson,
+}
+
+impl OutputFormat {
+    pub fn parse(s: &str) -> Result<Self, DatabaseCliError> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "table" => Ok(Self::Table),
+            "csv" => Ok(Self::Csv),
+            "tsv" => Ok(Self::Tsv),
+            "json" => Ok(Self::Json),
+            "ndjson" | "jsonl" => Ok(Self::Ndjson),
+            other => Err(DatabaseCliError::InvalidOutputFormat(other.to_string())),
+        }
+    }
+}
+
+/// Render only the row data, in the requested format. Goes to stdout so piped
+/// output stays free of headers/timing noise (those go to stderr via
+/// [`format_query_summary`]).
+pub fn format_query_data(result: &QueryResultSet, format: OutputFormat, header: bool) -> String {
+    match format {
+        OutputFormat::Table => format_table(result, header),
+        OutputFormat::Csv => format_delimited(result, ',', header),
+        OutputFormat::Tsv => format_delimited(result, '\t', header),
+        OutputFormat::Json => format_json(result),
+        OutputFormat::Ndjson => format_ndjson(result),
+    }
+}
+
+/// Human-readable run summary (row count, timing, truncation) intended for
+/// stderr so it never corrupts machine-readable stdout.
+pub fn format_query_summary(result: &QueryResultSet) -> String {
+    let mut out = format!(
+        "{} row(s) ({:.0?})\n",
+        result.row_count, result.execution_time
+    );
+    if result.truncated {
+        out.push_str(&format!(
+            "⚠ output truncated to {} row(s) (more rows exist) — \
+             raise the cap with --limit N (0 = unlimited), add SQL LIMIT/OFFSET, \
+             or increase [settings] query_limit\n",
+            result.row_count
+        ));
+    }
+    out
+}
+
+/// Combined table + summary string. Kept for `compare` and any human-facing
+/// caller that wants one blob; the CLI `query` path uses the split
+/// data/summary functions instead so it can route them to different streams.
 pub fn format_query_result(result: &QueryResultSet) -> String {
     if result.columns.is_empty() {
         return format!("Query returned 0 rows ({:.0?})\n", result.execution_time);
     }
 
-    let col_widths: Vec<usize> = result
+    let mut out = format_table(result, true);
+    out.push('\n');
+    out.push_str(&format!(
+        "{} row(s) ({:.0?})\n",
+        result.row_count, result.execution_time
+    ));
+    if result.truncated {
+        out.push_str(&format!(
+            "(results truncated to {} rows by query_limit)\n",
+            result.row_count
+        ));
+    }
+    out
+}
+
+fn format_table(result: &QueryResultSet, header: bool) -> String {
+    if result.columns.is_empty() {
+        return String::new();
+    }
+
+    let names: Vec<String> = result
         .columns
+        .iter()
+        .map(|n| render::table_cell(n))
+        .collect();
+    let disp: Vec<Vec<String>> = result
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|v| render::table_cell(cell_display(v)))
+                .collect()
+        })
+        .collect();
+
+    let col_widths: Vec<usize> = names
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let max_data = result
-                .rows
+            let max_data = disp
                 .iter()
-                .map(|row| row.get(i).map_or(0, |v| v.len()))
+                .map(|row| row.get(i).map_or(0, |v| v.chars().count()))
                 .max()
                 .unwrap_or(0);
-            name.len().max(max_data).max(4)
+            name.chars().count().max(max_data).max(4)
         })
         .collect();
 
     let mut out = String::new();
 
-    // Header
-    for (i, name) in result.columns.iter().enumerate() {
-        if i > 0 {
-            out.push_str("  ");
+    if header {
+        for (i, name) in names.iter().enumerate() {
+            if i > 0 {
+                out.push_str("  ");
+            }
+            out.push_str(&format!("{:<width$}", name, width = col_widths[i]));
         }
-        out.push_str(&format!("{:<width$}", name, width = col_widths[i]));
-    }
-    out.push('\n');
+        out.push('\n');
 
-    // Separator
-    for (i, &w) in col_widths.iter().enumerate() {
-        if i > 0 {
-            out.push_str("  ");
+        for (i, &w) in col_widths.iter().enumerate() {
+            if i > 0 {
+                out.push_str("  ");
+            }
+            out.push_str(&"-".repeat(w));
         }
-        out.push_str(&"-".repeat(w));
+        out.push('\n');
     }
-    out.push('\n');
 
-    // Rows
-    for row in &result.rows {
+    for row in &disp {
         for (i, val) in row.iter().enumerate() {
             if i > 0 {
                 out.push_str("  ");
@@ -291,18 +407,66 @@ pub fn format_query_result(result: &QueryResultSet) -> String {
         out.push('\n');
     }
 
-    out.push_str(&format!(
-        "\n{} row(s) ({:.0?})\n",
-        result.row_count, result.execution_time
-    ));
+    out
+}
 
-    if result.truncated {
-        out.push_str(&format!(
-            "(results truncated to {} rows by query_limit)\n",
-            result.row_count
-        ));
+fn format_delimited(result: &QueryResultSet, delim: char, header: bool) -> String {
+    let sep = delim.to_string();
+    let mut out = String::new();
+    if header {
+        let line: Vec<String> = result
+            .columns
+            .iter()
+            .map(|c| render::delimited_field(c, delim))
+            .collect();
+        out.push_str(&line.join(&sep));
+        out.push('\n');
     }
+    // SQL NULL becomes an empty field, matching the `export` CSV convention.
+    for row in &result.rows {
+        let line: Vec<String> = row
+            .iter()
+            .map(|v| {
+                v.as_deref()
+                    .map_or(String::new(), |s| render::delimited_field(s, delim))
+            })
+            .collect();
+        out.push_str(&line.join(&sep));
+        out.push('\n');
+    }
+    out
+}
 
+fn row_to_object(result: &QueryResultSet, row: &[Option<String>]) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (i, col) in result.columns.iter().enumerate() {
+        let v = match row.get(i) {
+            Some(Some(s)) => serde_json::Value::String(s.clone()),
+            _ => serde_json::Value::Null,
+        };
+        map.insert(col.clone(), v);
+    }
+    serde_json::Value::Object(map)
+}
+
+fn format_json(result: &QueryResultSet) -> String {
+    let arr: Vec<serde_json::Value> = result
+        .rows
+        .iter()
+        .map(|row| row_to_object(result, row))
+        .collect();
+    let mut out = serde_json::to_string_pretty(&serde_json::Value::Array(arr)).unwrap_or_default();
+    out.push('\n');
+    out
+}
+
+fn format_ndjson(result: &QueryResultSet) -> String {
+    let mut out = String::new();
+    for row in &result.rows {
+        let obj = row_to_object(result, row);
+        out.push_str(&serde_json::to_string(&obj).unwrap_or_default());
+        out.push('\n');
+    }
     out
 }
 
@@ -459,7 +623,7 @@ mod tests {
         QueryResultSet {
             database_name: "testdb".to_string(),
             columns: vec!["id".to_string()],
-            rows: (0..row_count).map(|i| vec![i.to_string()]).collect(),
+            rows: (0..row_count).map(|i| vec![Some(i.to_string())]).collect(),
             row_count,
             execution_time: Duration::from_millis(10),
             truncated,
@@ -495,5 +659,133 @@ mod tests {
         let output = format_query_result(&result);
         assert!(output.contains("0 rows"));
         assert!(!output.contains("truncated"));
+    }
+
+    #[test]
+    fn allows_trailing_semicolon() {
+        assert!(validate_readonly("SELECT 1;").is_ok());
+        assert!(validate_readonly("SELECT 1 ;  ").is_ok());
+        assert!(validate_readonly("SELECT 'a;b';").is_ok());
+    }
+
+    #[test]
+    fn multi_statement_error_message_is_clean() {
+        let err = validate_readonly("SELECT 1; SELECT 2").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.to_lowercase().contains("multi-statement"));
+        // The old bug spliced the sentence into the read-only template.
+        assert!(!msg.contains("begins with"));
+    }
+
+    #[test]
+    fn double_trailing_semicolon_still_rejected() {
+        assert!(validate_readonly("SELECT 1;;").is_err());
+    }
+
+    fn wide_cell_result() -> QueryResultSet {
+        QueryResultSet {
+            database_name: "t".to_string(),
+            columns: vec!["big".to_string()],
+            rows: vec![vec![Some("A".repeat(300_000))]],
+            row_count: 1,
+            execution_time: Duration::from_millis(1),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn wide_cell_renders_without_panic() {
+        let result = wide_cell_result();
+        let out = format_query_result(&result);
+        assert!(out.contains('…'));
+        // The crash was here: a 300k-wide format width. Exercise all paths.
+        let _ = format_query_data(&result, OutputFormat::Table, true);
+        let _ = format_query_data(&result, OutputFormat::Csv, true);
+    }
+
+    #[test]
+    fn csv_quotes_special_chars() {
+        let result = QueryResultSet {
+            database_name: "t".to_string(),
+            columns: vec!["a".to_string(), "b".to_string()],
+            rows: vec![
+                vec![Some("x,y".to_string()), Some("line1\nline2".to_string())],
+                vec![Some("he\"llo".to_string()), Some("plain".to_string())],
+            ],
+            row_count: 2,
+            execution_time: Duration::from_millis(1),
+            truncated: false,
+        };
+        let csv = format_query_data(&result, OutputFormat::Csv, true);
+        assert!(csv.starts_with("a,b\n"));
+        assert!(csv.contains("\"x,y\""));
+        assert!(csv.contains("\"line1\nline2\""));
+        assert!(csv.contains("\"he\"\"llo\""));
+    }
+
+    #[test]
+    fn no_header_omits_header() {
+        let result = make_result(false, 2);
+        let csv = format_query_data(&result, OutputFormat::Csv, false);
+        assert!(!csv.starts_with("id"));
+        assert_eq!(csv.lines().count(), 2);
+    }
+
+    #[test]
+    fn ndjson_one_object_per_row() {
+        let result = make_result(false, 3);
+        let nd = format_query_data(&result, OutputFormat::Ndjson, true);
+        assert_eq!(nd.lines().count(), 3);
+        assert!(nd.lines().all(|l| l.starts_with('{') && l.ends_with('}')));
+    }
+
+    #[test]
+    fn json_is_array_of_objects() {
+        let result = make_result(false, 2);
+        let j = format_query_data(&result, OutputFormat::Json, true);
+        let parsed: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert_eq!(parsed[0]["id"], "0");
+    }
+
+    #[test]
+    fn summary_routes_truncation_with_actionable_hint() {
+        let result = make_result(true, 500);
+        let s = format_query_summary(&result);
+        assert!(s.contains("500 row(s)"));
+        assert!(s.contains("truncated to 500 row(s)"));
+        assert!(s.contains("--limit"));
+    }
+
+    #[test]
+    fn null_is_distinct_across_formats() {
+        let result = QueryResultSet {
+            database_name: "t".to_string(),
+            columns: vec!["a".to_string()],
+            rows: vec![vec![None], vec![Some("NULL".to_string())]],
+            row_count: 2,
+            execution_time: Duration::from_millis(1),
+            truncated: false,
+        };
+        // CSV: real NULL is an empty field; the literal string "NULL" is not.
+        let csv = format_query_data(&result, OutputFormat::Csv, false);
+        assert_eq!(csv, "\nNULL\n");
+        // JSON: real NULL serializes as json null, the string stays a string.
+        let json = format_query_data(&result, OutputFormat::Json, true);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["a"], serde_json::Value::Null);
+        assert_eq!(parsed[1]["a"], "NULL");
+        // Table: both render as the text NULL for humans.
+        let table = format_query_data(&result, OutputFormat::Table, false);
+        assert_eq!(table.matches("NULL").count(), 2);
+    }
+
+    #[test]
+    fn output_format_parse() {
+        assert_eq!(OutputFormat::parse("CSV").unwrap(), OutputFormat::Csv);
+        assert_eq!(OutputFormat::parse("jsonl").unwrap(), OutputFormat::Ndjson);
+        assert_eq!(OutputFormat::parse("ndjson").unwrap(), OutputFormat::Ndjson);
+        assert!(OutputFormat::parse("xml").is_err());
     }
 }

@@ -17,7 +17,26 @@ fn main() -> Result<()> {
         Some(Commands::ListDatabases) => run::run_list_databases(&cli)?,
         Some(Commands::HealthCheck) => run::run_health_check(&cli)?,
         Some(Commands::Schema { ref schema }) => run::run_schema(&cli, schema)?,
-        Some(Commands::Query { ref sql }) => run::run_query(&cli, sql)?,
+        Some(Commands::Query {
+            ref sql,
+            limit,
+            ref format,
+            no_header,
+        }) => run::run_query(&cli, sql, limit, format, no_header)?,
+        Some(Commands::Export {
+            ref table,
+            ref query,
+            ref format,
+            ref output,
+            ref schema,
+        }) => run::run_export(
+            &cli,
+            table.as_deref(),
+            query.as_deref(),
+            format,
+            output.as_deref(),
+            schema,
+        )?,
         Some(Commands::Exec {
             ref sql,
             ref file,

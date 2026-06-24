@@ -66,7 +66,11 @@ pub fn draw_compare(frame: &mut Frame, app: &AppState, area: ratatui::layout::Re
                 )));
 
                 for row in &qr.rows {
-                    let row_str: String = row.join("  ");
+                    let row_str: String = row
+                        .iter()
+                        .map(|c| c.as_deref().unwrap_or("NULL"))
+                        .collect::<Vec<_>>()
+                        .join("  ");
                     lines.push(Line::from(Span::styled(
                         format!("  {row_str}"),
                         Style::default().fg(Color::White),

@@ -20,6 +20,11 @@ pub struct Cli {
     #[arg(long = "all", global = true)]
     pub all_databases: bool,
 
+    /// Override statement_timeout for this run (e.g. 30s, 500ms, 5min, 1h;
+    /// 0/disable turns it off). Defaults to the [settings] value, then 30s.
+    #[arg(long = "timeout", global = true)]
+    pub timeout: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -48,6 +53,15 @@ pub enum Commands {
     Query {
         /// The SQL query to execute
         sql: String,
+        /// Max rows to return (overrides [settings] query_limit; 0 = unlimited)
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Output format for stdout (summary/timing always go to stderr)
+        #[arg(long, default_value = "table", value_parser = ["table", "csv", "tsv", "json", "ndjson"])]
+        format: String,
+        /// Omit the header row (table/csv/tsv)
+        #[arg(long = "no-header")]
+        no_header: bool,
     },
     /// Execute write/DDL SQL on one database (local CLI only; not exposed via MCP)
     ///
@@ -124,6 +138,27 @@ pub enum Commands {
     /// Show full help reference: commands, keys, config, MCP, security
     #[command(name = "reference")]
     Reference,
+    /// Stream a table or read-only query to a file/stdout (csv, jsonl, sql)
+    ///
+    /// Uses a server-side cursor, so it is not bounded by query_limit and is
+    /// safe for very large tables. Read-only; never exposed via MCP.
+    Export {
+        /// Table to export. Mutually exclusive with --query.
+        table: Option<String>,
+        /// Export the result of a read-only query instead of a whole table.
+        /// `--format sql` is not available in this mode (no single target table).
+        #[arg(long = "query", conflicts_with = "table")]
+        query: Option<String>,
+        /// Output format: csv, jsonl, sql
+        #[arg(long, default_value = "csv", value_parser = ["csv", "jsonl", "ndjson", "sql"])]
+        format: String,
+        /// Write to this file instead of stdout
+        #[arg(long)]
+        output: Option<String>,
+        /// Schema name (table mode)
+        #[arg(long, default_value = "public")]
+        schema: String,
+    },
     /// Preview rows from a table
     Sample {
         /// Table name

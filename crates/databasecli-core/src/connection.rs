@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::config::DatabaseConfig;
+use crate::config::{DEFAULT_STATEMENT_TIMEOUT, DatabaseConfig};
 use crate::error::DatabaseCliError;
 
 /// A live database connection plus the config that opened it.
@@ -29,6 +29,7 @@ enum ConnectionMode {
 fn open_client(
     config: &DatabaseConfig,
     mode: ConnectionMode,
+    statement_timeout: &str,
 ) -> Result<postgres::Client, DatabaseCliError> {
     let connector = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(true)
@@ -39,15 +40,25 @@ fn open_client(
     let mut client = postgres::Client::connect(&config.connection_string(), connector)
         .map_err(|e| DatabaseCliError::ConnectionFailed(e.to_string()))?;
 
-    let setup = match mode {
-        ConnectionMode::ReadOnly => {
-            "SET default_transaction_read_only = on; SET statement_timeout = '30s'"
-        }
-        ConnectionMode::LocalExec => "SET statement_timeout = '30s'",
+    // `statement_timeout` is pre-normalized by `config::normalize_statement_timeout`
+    // (digits + a known unit only), so interpolating it here is injection-safe.
+    let mut setup = match mode {
+        ConnectionMode::ReadOnly => format!(
+            "SET default_transaction_read_only = on; SET statement_timeout = '{statement_timeout}'"
+        ),
+        ConnectionMode::LocalExec => format!("SET statement_timeout = '{statement_timeout}'"),
     };
 
+    // An optional connection schema is normalized into quoted identifiers so it is
+    // injection-safe before reaching `SET search_path`.
+    if let Some(raw) = config.schema.as_deref() {
+        let search_path = crate::config::normalize_search_path(raw)
+            .ok_or_else(|| DatabaseCliError::InvalidSearchPath(raw.to_string()))?;
+        setup.push_str(&format!("; SET search_path TO {search_path}"));
+    }
+
     client
-        .batch_execute(setup)
+        .batch_execute(&setup)
         .map_err(|e| DatabaseCliError::QueryFailed(e.to_string()))?;
 
     Ok(client)
@@ -55,12 +66,15 @@ fn open_client(
 
 /// Open a fresh writable connection for a single local CLI/TUI execution.
 ///
-/// Sets `statement_timeout = '30s'` but does NOT set
+/// Applies `statement_timeout` but does NOT set
 /// `default_transaction_read_only`. This connection is intended for one-shot
 /// `exec` use by the local operator and must NEVER be reachable from the
 /// MCP surface.
-pub fn connect_for_local_exec(config: &DatabaseConfig) -> Result<LiveConnection, DatabaseCliError> {
-    let client = open_client(config, ConnectionMode::LocalExec)?;
+pub fn connect_for_local_exec(
+    config: &DatabaseConfig,
+    statement_timeout: &str,
+) -> Result<LiveConnection, DatabaseCliError> {
+    let client = open_client(config, ConnectionMode::LocalExec, statement_timeout)?;
     Ok(LiveConnection {
         config: config.clone(),
         client,
@@ -69,12 +83,20 @@ pub fn connect_for_local_exec(config: &DatabaseConfig) -> Result<LiveConnection,
 
 pub struct ConnectionManager {
     connections: HashMap<String, LiveConnection>,
+    statement_timeout: String,
 }
 
 impl ConnectionManager {
     pub fn new() -> Self {
+        Self::with_statement_timeout(DEFAULT_STATEMENT_TIMEOUT)
+    }
+
+    /// Build a manager whose connections apply `statement_timeout` (already
+    /// normalized by `config::normalize_statement_timeout`).
+    pub fn with_statement_timeout(statement_timeout: impl Into<String>) -> Self {
         Self {
             connections: HashMap::new(),
+            statement_timeout: statement_timeout.into(),
         }
     }
 
@@ -83,7 +105,7 @@ impl ConnectionManager {
             return Err(DatabaseCliError::AlreadyConnected(config.name.clone()));
         }
 
-        let client = open_client(config, ConnectionMode::ReadOnly)?;
+        let client = open_client(config, ConnectionMode::ReadOnly, &self.statement_timeout)?;
 
         self.connections.insert(
             config.name.clone(),

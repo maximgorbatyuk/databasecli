@@ -124,7 +124,8 @@ All commands run from the repository root unless noted otherwise.
 | List configured databases | `databasecli list` | [`crates/databasecli-cli/src/args.rs`](crates/databasecli-cli/src/args.rs) |
 | Health check (basic) | `databasecli health` | [`crates/databasecli-core/src/health.rs`](crates/databasecli-core/src/health.rs) |
 | Enhanced health (version, size, uptime) | `databasecli health-check --all` | [`crates/databasecli-core/src/commands/health.rs`](crates/databasecli-core/src/commands/health.rs) |
-| Read-only SQL | `databasecli query --db <name> "<SQL>"` | [`crates/databasecli-core/src/commands/query.rs`](crates/databasecli-core/src/commands/query.rs) |
+| Read-only SQL | `databasecli query --db <name> [--limit N] [--format table\|csv\|tsv\|json\|ndjson] [--no-header] "<SQL>"` | [`crates/databasecli-core/src/commands/query.rs`](crates/databasecli-core/src/commands/query.rs) |
+| Stream data export (csv/jsonl/sql) | `databasecli export --db <name> <table>\|--query "<SQL>" [--format ...] [--output FILE]` | [`crates/databasecli-core/src/commands/export.rs`](crates/databasecli-core/src/commands/export.rs) |
 | Local-only write/DDL (inline) | `databasecli exec --db <name> [--yes] "<SQL>"` | [`crates/databasecli-core/src/commands/execute.rs`](crates/databasecli-core/src/commands/execute.rs) |
 | Local-only write/DDL (script) | `databasecli exec --db <name> --file <PATH> [--transaction] [--yes]` | [`crates/databasecli-core/src/commands/execute.rs`](crates/databasecli-core/src/commands/execute.rs) |
 | Full reference of CLI subcommands | `databasecli reference` | [`crates/databasecli-core/src/help.rs`](crates/databasecli-core/src/help.rs) |
@@ -160,7 +161,12 @@ The command interactively asks which coding agents to configure for MCP, creates
    user = readonly
    password = secret456
    dbname = myapp_staging
+   schema = analytics, public   ; optional search_path (single name or comma-separated)
    ```
+
+   The optional `schema` key sets the connection's `search_path` so unqualified
+   table names resolve against it on every path (`query`, `sample`, `schema`,
+   `exec`, and MCP). Omit it to use PostgreSQL's default (`"$user", public`).
 
 2. Create `.mcp.json` in your project root if you want AI-agent access:
 
@@ -183,6 +189,21 @@ The command interactively asks which coding agents to configure for MCP, creates
    databasecli health-check --all           # check all databases
    databasecli schema --db production       # inspect schema
    databasecli query --db production "SELECT count(*) FROM users"
+
+   # Machine-readable output (data on stdout, summary on stderr):
+   databasecli query --db production --format csv "SELECT * FROM users" > users.csv
+   databasecli query --db production --format ndjson --limit 0 "SELECT * FROM events" > events.ndjson
+   # SQL NULL → empty field in csv/tsv, json null in json/ndjson, the text NULL in tables.
+   # With --all-databases, json emits one document per database; prefer ndjson for a single stream.
+
+   # Stream a whole table or query to a file via a server-side cursor
+   # (not bounded by query_limit; safe for very large tables):
+   databasecli export --db production users --format csv --output users.csv
+   databasecli export --db production users --format sql --output users.sql
+   databasecli export --db production --query "SELECT * FROM big_table" --format jsonl --output rows.ndjson
+
+   # Override the per-connection statement timeout for a long analytical scan:
+   databasecli query --db production --timeout 5min "SELECT ... heavy aggregate ..."
 
    # Local-only write/DDL execution. Asks `[y/N]` before destructive statements;
    # pass --yes to bypass. Not exposed via MCP.
@@ -242,6 +263,18 @@ The repo emits configuration files in user projects (via `databasecli init`). Re
 | Opencode MCP | `<project>/opencode.jsonc` | `mcp.databasecli` entry |
 
 The exact contents written by each path live in [`crates/databasecli-core/src/init.rs`](crates/databasecli-core/src/init.rs); see also [`docs/interactions.md`](docs/interactions.md).
+
+### `[settings]` section
+
+Optional global settings in `databases.ini`:
+
+```ini
+[settings]
+query_limit = 500          ; max rows returned by `query` (0 = unlimited); --limit overrides per run
+statement_timeout = 30s    ; per-connection timeout; 0/disable turns it off; accepts ms, s, min, h
+```
+
+`statement_timeout` applies to every connection (read-only and `exec` alike) and can be overridden per run with the global `--timeout` flag. `export` uses a server-side cursor and is not bounded by `query_limit`.
 
 ## License
 

@@ -91,7 +91,9 @@ fn run_loop(
         .unwrap_or_default();
     let query_limit = settings.query_limit;
     let mut app = AppState::new(has_config, config_path, directory);
-    let conn_manager = Arc::new(Mutex::new(ConnectionManager::new()));
+    let conn_manager = Arc::new(Mutex::new(ConnectionManager::with_statement_timeout(
+        settings.statement_timeout.clone(),
+    )));
     let mut bg_rx: Option<mpsc::Receiver<BackgroundResult>> = None;
 
     loop {
@@ -281,12 +283,14 @@ fn run_loop(
                             let path = resolve_config_path_with_base(directory_for_bg.as_deref())
                                 .map_err(|e| e.to_string())?;
                             let configs = load_databases(&path).map_err(|e| e.to_string())?;
+                            let settings = load_settings(&path);
                             let config =
                                 configs.iter().find(|c| c.name == database).ok_or_else(|| {
                                     format!("No configured database named '{database}'")
                                 })?;
                             let mut conn =
-                                connect_for_local_exec(config).map_err(|e| e.to_string())?;
+                                connect_for_local_exec(config, &settings.statement_timeout)
+                                    .map_err(|e| e.to_string())?;
                             execute_script(&mut conn, &statements).map_err(|e| e.to_string())
                         })();
                         let _ = tx.send(BackgroundResult::Execute(outcome));

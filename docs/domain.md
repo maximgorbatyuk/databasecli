@@ -4,9 +4,11 @@ This repo is an operational tool for connecting to user-owned PostgreSQL databas
 
 The "domain" surface that does live in the repo is small and operational:
 
-- **Database connection profiles** — INI sections parsed from `<cwd>/.databasecli/databases.ini` into `DatabaseConfig` records (`name`, `host`, `port`, `user`, `password`, `dbname`). Owned by [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs).
+- **Database connection profiles** — INI sections parsed from `<cwd>/.databasecli/databases.ini` into `DatabaseConfig` records (`name`, `host`, `port`, `user`, `password`, `dbname`, and an optional `schema` that sets the connection `search_path`). Owned by [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs).
 - **Live connections** — open `postgres::Client` handles wrapped as `LiveConnection`, kept in a `ConnectionManager` keyed by profile name. Read-only by default; the local `exec` path opens a separate writable connection per call. Owned by [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs).
-- **Read-only commands** — `query`, `compare`, `schema`, `sample`, `analyze`, `summary`, `erd`, `trend`, `health`, `health-check`, `list-databases`. Each is a directory entry under [`crates/databasecli-core/src/commands/`](../crates/databasecli-core/src/commands).
+- **Read-only commands** — `query`, `export`, `compare`, `schema`, `sample`, `analyze`, `summary`, `erd`, `trend`, `health`, `health-check`, `list-databases`. Each is a directory entry under [`crates/databasecli-core/src/commands/`](../crates/databasecli-core/src/commands).
+- **Streaming export** — `export`, in [`crates/databasecli-core/src/commands/export.rs`](../crates/databasecli-core/src/commands/export.rs). Streams a table or read-only query to csv/jsonl/sql via a server-side cursor, bypassing `query_limit` and the ASCII renderer. Read-only; CLI/TUI-only, never exposed via MCP.
+- **Shared table rendering** — [`crates/databasecli-core/src/commands/render.rs`](../crates/databasecli-core/src/commands/render.rs) clips cells for ASCII-table output (`query`/`sample`/`exec`) so a single wide value cannot drive the `format!` width past `u16::MAX`.
 - **Local write/DDL command** — `exec`, in [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs). Operates on a single database, validates a deliberately narrow SQL subset, and is unreachable from MCP.
 - **Init action** — bootstraps `.databasecli/databases.ini` plus per-agent MCP config files. Owned by [`crates/databasecli-core/src/init.rs`](../crates/databasecli-core/src/init.rs).
 
@@ -18,7 +20,9 @@ Per-type field lists, parameter signatures, and return shapes are documented nex
 |---------|----------------|----------------|
 | `StatementKind` (`Read` / `Write` / `Destructive` / `Unsupported`) | [`crates/databasecli-core/src/commands/execute.rs`](../crates/databasecli-core/src/commands/execute.rs) | Single source of truth for which SQL verbs `exec` accepts and which require confirmation |
 | `ConnectionMode` (`ReadOnly` / `LocalExec`) | [`crates/databasecli-core/src/connection.rs`](../crates/databasecli-core/src/connection.rs) | Determines whether a connection is opened with `default_transaction_read_only = on` |
-| `Settings.query_limit` | [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs) | Default 500, `0` = unlimited; applies to every read path including MCP |
+| `Settings.query_limit` | [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs) | Default 500, `0` = unlimited; applies to every read path including MCP. `query --limit` overrides per run; `export` ignores it (server-side cursor) |
+| `Settings.statement_timeout` | [`crates/databasecli-core/src/config.rs`](../crates/databasecli-core/src/config.rs) | Default `30s`, normalized for safe `SET` interpolation; `0`/disable turns it off; overridable per run via `--timeout` |
+| `OutputFormat` (`Table` / `Csv` / `Tsv` / `Json` / `Ndjson`) | [`crates/databasecli-core/src/commands/query.rs`](../crates/databasecli-core/src/commands/query.rs) | Shapes `query` stdout; summary/timing always go to stderr |
 | `CodingAgent` (`ClaudeCode` / `Cursor` / `Codex` / `Opencode`) | [`crates/databasecli-core/src/init.rs`](../crates/databasecli-core/src/init.rs) | Set of MCP-aware agents that `init` can configure; adding one means new write target |
 
 ## Cross-cutting patterns

@@ -49,8 +49,13 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                         .to_string(),
                 },
                 HelpItem {
-                    name: "databasecli query <sql>".to_string(),
-                    description: "Run a read-only SQL query (SELECT, WITH, EXPLAIN, SHOW)"
+                    name: "databasecli query <sql> [--limit N] [--format table|csv|tsv|json|ndjson] [--no-header]".to_string(),
+                    description: "Run a read-only SQL query (SELECT, WITH, EXPLAIN, SHOW, TABLE). Data goes to stdout; row count, timing, and truncation notices go to stderr so piped output stays clean. A single trailing semicolon is allowed. --limit overrides [settings] query_limit (0 = unlimited). SQL NULL renders as NULL in tables, an empty field in csv/tsv, and json null. With --all-databases, json prints one document per database (use ndjson for a single combined stream)."
+                        .to_string(),
+                },
+                HelpItem {
+                    name: "databasecli export <table>|--query <sql> [--format csv|jsonl|sql] [--output FILE] [--schema <name>]".to_string(),
+                    description: "Stream a table or read-only query to csv/jsonl/sql via a server-side cursor. Not bounded by query_limit and safe for very large tables. --format sql emits INSERTs and needs a table. Read-only; never exposed via MCP."
                         .to_string(),
                 },
                 HelpItem {
@@ -119,6 +124,10 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                     description: "Connect to all configured databases".to_string(),
                 },
                 HelpItem {
+                    name: "--timeout <duration>".to_string(),
+                    description: "Override statement_timeout for this run (e.g. 30s, 500ms, 5min, 1h; 0/disable turns it off). Falls back to [settings] then 30s.".to_string(),
+                },
+                HelpItem {
                     name: "-h, --help".to_string(),
                     description: "Show clap-generated help for any command".to_string(),
                 },
@@ -183,7 +192,7 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                 },
                 HelpItem {
                     name: "[settings] section".to_string(),
-                    description: "query_limit = 500 (max rows returned from user queries, 0 = unlimited)".to_string(),
+                    description: "query_limit = 500 (max rows returned from user queries, 0 = unlimited); statement_timeout = 30s (per-connection timeout; 0/disable turns it off; accepts ms, s, min, h)".to_string(),
                 },
             ],
         },
@@ -233,7 +242,7 @@ pub fn build_help_sections() -> Vec<HelpSection> {
                 },
                 HelpItem {
                     name: "Statement timeout".to_string(),
-                    description: "SET statement_timeout = '30s' on every connection (read-only and writable alike)".to_string(),
+                    description: "SET statement_timeout on every connection (read-only and writable alike); defaults to 30s, configurable via [settings] statement_timeout or --timeout (0/disable turns it off)".to_string(),
                 },
                 HelpItem {
                     name: "SQL validation (query)".to_string(),
